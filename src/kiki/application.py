@@ -178,6 +178,8 @@ class KikiApplication(Adw.Application):
             on_speaking=self._on_tts_speaking,
             on_idle=self._on_tts_idle,
             on_error=self._on_tts_error,
+            controller=self._build_voice_controller(),
+            use_controller_route=self._settings.tts.use_controller_route,
         )
         self._register_actions()
         self._subscribe_ui_event("chat.stream.start", self._on_stream_start)
@@ -188,6 +190,35 @@ class KikiApplication(Adw.Application):
         self._subscribe_ui_event("chat.stream.error", self._on_stream_error)
         if self._settings.app.autostart:
             set_autostart(True)
+
+    def _build_voice_controller(self):
+        """The opt-in route, built only when the flag asks for it.
+
+        Constructed lazily so the adapters — and httpx with them — stay out of
+        the process on the default path. Returns None on any failure: the
+        director then keeps the file-based route rather than losing speech.
+        """
+        if not self._settings.tts.use_controller_route:
+            return None
+        try:
+            from kiki.voice.tts.adapters import PipeWireAudioSink, ServiceTTSProvider
+            from kiki.voice.tts.controller import VoicePlaybackController
+
+            tts = self._settings.tts
+            provider = ServiceTTSProvider(
+                tts.base_url, speaker=tts.speaker, language=tts.language
+            )
+            # synthesize() refuses to run before load(), and load() is a health
+            # probe against the service — so it belongs on the bridge, not here
+            # on the GTK thread during startup.
+            self._bridge.submit(
+                provider.load(),
+                on_error=lambda exc: log.warning("TTS provider not ready: %s", exc),
+            )
+            return VoicePlaybackController(provider, PipeWireAudioSink())
+        except Exception:
+            log.exception("could not build the controller voice route — staying on the old one")
+            return None
 
     def _install_css(self) -> None:
         provider = Gtk.CssProvider()

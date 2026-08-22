@@ -182,6 +182,9 @@ language = "German"
 stream_sentences = true
 # If the GPU service is unavailable, use Fedora's local espeak-ng voice.
 fallback_to_system = true
+# Opt-in: route speech through VoicePlaybackController (streaming chunks,
+# bounded queue) instead of the file-based path. Off until verified by hand.
+use_controller_route = false
 
 [watch]
 # Proactive notices. KIKI may speak up on her own — she still cannot *act* on

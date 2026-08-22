@@ -229,6 +229,9 @@ class TtsSettings:
     language: str = "German"
     stream_sentences: bool = True
     fallback_to_system: bool = True
+    # Opt-in: speak through VoicePlaybackController instead of the file-based
+    # route. Off until a manual end-to-end test confirms the new path.
+    use_controller_route: bool = False
 
 
 @dataclass
@@ -387,6 +390,7 @@ class Settings:
                 "language": self.tts.language,
                 "stream_sentences": self.tts.stream_sentences,
                 "fallback_to_system": self.tts.fallback_to_system,
+                "use_controller_route": self.tts.use_controller_route,
             },
             "watch": {
                 "enabled": self.watch.enabled,
@@ -536,6 +540,9 @@ def settings_from_mapping(data: dict[str, Any]) -> Settings:
             language=language,
             stream_sentences=bool(tts.get("stream_sentences", True)),
             fallback_to_system=bool(tts.get("fallback_to_system", True)),
+            # Second safety net: a mapping that predates the key must not
+            # switch the route on by accident.
+            use_controller_route=bool(tts.get("use_controller_route", False)),
         ),
         watch=_parse_watch(data.get("watch") or {}),
         workspaces=WorkspaceSettings(allowed_roots=_parse_workspace_roots(workspaces.get("allowed_roots"))),

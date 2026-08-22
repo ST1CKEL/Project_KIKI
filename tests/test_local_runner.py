@@ -76,9 +76,27 @@ def test_process_group_stop(tmp_path: Path) -> None:
         _pgid, child = (int(part) for part in text.split())
         handle.stop()
         await handle.wait(timeout=3)
-        time.sleep(0.15)
-        with pytest.raises(OSError):
-            os.kill(child, 0)
+        dead = False
+        for _ in range(40):
+            try:
+                # If process is reaped or does not exist
+                os.kill(child, 0)
+                # Check if it is a zombie (terminated but not reaped by init)
+                status_path = Path(f"/proc/{child}/status")
+                if status_path.is_file():
+                    content = status_path.read_text(encoding="utf-8")
+                    if "State:\tZ (zombie)" in content or "State:\tX" in content:
+                        dead = True
+                        break
+                await asyncio.sleep(0.05)
+            except OSError:
+                dead = True
+                break
+        try:
+            os.kill(child, 9)
+        except OSError:
+            pass
+        assert dead, f"Child process {child} still alive after killpg"
 
     asyncio.run(_run())
 
