@@ -114,7 +114,9 @@ class ServiceTTSProvider:
         self._chunk_seconds = max(0.05, float(chunk_seconds))
         self._timeout = timeout
         self._wav_dir = wav_dir
-        self._owns_wav_dir = wav_dir is None
+        # Set only when we create our own directory; a caller's wav_dir is
+        # never ours to delete.
+        self._owned: tempfile.TemporaryDirectory[str] | None = None
         self._synthesize = synthesize
         self._health = health
         self._status = TTSProviderStatus.UNLOADED
@@ -300,22 +302,25 @@ class ServiceTTSProvider:
 
     def _wav_path(self) -> Path:
         if self._wav_dir is None:
-            self._wav_dir = Path(tempfile.mkdtemp(prefix="kiki-tts-"))
-            self._owns_wav_dir = True
+            # TemporaryDirectory, not mkdtemp: it owns a finalizer that removes
+            # the directory when this provider is collected and again at
+            # interpreter exit. mkdtemp had no such owner, so every caller that
+            # skipped unload() left an empty kiki-tts-* behind for good.
+            self._owned = tempfile.TemporaryDirectory(prefix="kiki-tts-")
+            self._wav_dir = Path(self._owned.name)
         self._wav_dir.mkdir(parents=True, exist_ok=True)
         return self._wav_dir / f"{uuid4().hex}.wav"
 
     def _discard_wav_dir(self) -> None:
-        if not self._owns_wav_dir or self._wav_dir is None:
+        """Idempotent, and only ever removes a directory we created ourselves."""
+        owned, self._owned = self._owned, None
+        if owned is None:
             return
-        directory = self._wav_dir
         self._wav_dir = None
-        for leftover in directory.glob("*.wav"):
-            _unlink(leftover)
         try:
-            directory.rmdir()
+            owned.cleanup()
         except OSError:
-            log.debug("could not remove %s", directory)
+            log.debug("could not remove %s", owned.name)
 
 
 def _read_pcm16(path: Path) -> tuple[bytes, int, int]:
@@ -350,7 +355,7 @@ class PipeWireAudioSink:
     def __init__(self, player: object | None = None, *, wav_dir: Path | None = None) -> None:
         self._player = player if player is not None else PipeWirePlayer()
         self._wav_dir = wav_dir
-        self._owns_wav_dir = wav_dir is None
+        self._owned: tempfile.TemporaryDirectory[str] | None = None
         self._pending: asyncio.Future[str] | None = None
         self._closed = False
 
@@ -420,22 +425,23 @@ class PipeWireAudioSink:
 
     def _wav_path(self) -> Path:
         if self._wav_dir is None:
-            self._wav_dir = Path(tempfile.mkdtemp(prefix="kiki-sink-"))
-            self._owns_wav_dir = True
+            # Same ownership as the provider: a finalizer, not a hope that
+            # someone remembers close().
+            self._owned = tempfile.TemporaryDirectory(prefix="kiki-sink-")
+            self._wav_dir = Path(self._owned.name)
         self._wav_dir.mkdir(parents=True, exist_ok=True)
         return self._wav_dir / f"{uuid4().hex}.wav"
 
     def _discard_wav_dir(self) -> None:
-        if not self._owns_wav_dir or self._wav_dir is None:
+        """Idempotent, and only ever removes a directory we created ourselves."""
+        owned, self._owned = self._owned, None
+        if owned is None:
             return
-        directory = self._wav_dir
         self._wav_dir = None
-        for leftover in directory.glob("*.wav"):
-            _unlink(leftover)
         try:
-            directory.rmdir()
+            owned.cleanup()
         except OSError:
-            log.debug("could not remove %s", directory)
+            log.debug("could not remove %s", owned.name)
 
 
 def _write_wav(path: Path, pcm: bytes, sample_rate: int, channels: int) -> None:

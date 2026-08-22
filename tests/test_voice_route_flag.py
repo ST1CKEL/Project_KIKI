@@ -8,6 +8,7 @@ towards the UI while using none of the file-based machinery.
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import time
 from pathlib import Path
 
@@ -16,6 +17,16 @@ import pytest
 from kiki.config.settings import default_mapping, load_settings, settings_from_mapping
 from kiki.voice.director import SpeechDirector
 from kiki.voice.tts import TTSError, TTSGenerationResult, TTSRequest
+
+
+@pytest.fixture(autouse=True)
+def _temp_root(tmp_path, monkeypatch):
+    """No test in this file may leave anything in the real /tmp."""
+    root = tmp_path / "tmproot"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
+
 
 # --- doubles ----------------------------------------------------------------
 

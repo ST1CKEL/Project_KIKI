@@ -15,6 +15,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 
@@ -38,6 +39,21 @@ from kiki.voice.tts.adapters import (
 from kiki.voice.tts_client import TtsError, TtsHealth
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def temp_root(tmp_path, monkeypatch):
+    """Redirect every implicit temp path into the test's own directory.
+
+    The adapters fall back to a temp directory when no wav_dir is given, and
+    thirty tests take that path. Pointed at the real /tmp they left a directory
+    behind per test — which is how the leak under investigation grew as fast as
+    it did. Yielded so a test can assert the root came out empty.
+    """
+    root = tmp_path / "tmproot"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    return root
 
 
 # --- helpers ---------------------------------------------------------------
@@ -954,3 +970,229 @@ def _sync_submit(coro, *, on_success=None, on_error=None, on_complete=None) -> _
     if on_complete is not None:
         on_complete()
     return handle
+
+
+# --- the lifetime of the working directory itself ---------------------------
+#
+# Owner:     whichever adapter created it. A wav_dir handed in by the caller is
+#            never owned and never removed.
+# Lifetime:  first synthesise/play until unload()/close(), the adapter being
+#            garbage-collected, or interpreter exit — whichever comes first.
+# The tests below walk every one of those exits.
+
+
+def _dirs(root: Path, prefix: str) -> list[Path]:
+    return sorted(root.glob(f"{prefix}*"))
+
+
+def test_the_provider_creates_its_directory_only_when_it_needs_one(temp_root) -> None:
+    provider, _ = _provider()
+    asyncio.run(provider.load())
+
+    assert _dirs(temp_root, "kiki-tts-") == []  # a health probe writes nothing
+
+
+def test_the_working_directory_is_private(temp_root) -> None:
+    """0700 on the directory, 0600 on the files inside it."""
+    import stat
+
+    provider, _ = _provider()
+    _collect(provider, TTSRequest(text="Kurz."))
+    created = _dirs(temp_root, "kiki-tts-")
+
+    assert len(created) == 1
+    assert stat.S_IMODE(created[0].stat().st_mode) == 0o700
+    assert created[0].name.startswith("kiki-tts-")
+    asyncio.run(provider.unload())
+
+
+def test_success_leaves_no_directory_behind(temp_root) -> None:
+    provider, _ = _provider()
+    _collect(provider, TTSRequest(text="Alles gut."))
+    asyncio.run(provider.unload())
+
+    assert _dirs(temp_root, "kiki-tts-") == []
+
+
+def test_a_provider_error_leaves_no_directory_behind(temp_root) -> None:
+    provider, _ = _provider(raises=TtsError("TTS-Dienst nicht erreichbar"))
+    with pytest.raises(TTSError):
+        _collect(provider, TTSRequest(text="Weg."))
+    asyncio.run(provider.unload())
+
+    assert _dirs(temp_root, "kiki-tts-") == []
+
+
+def test_a_playback_error_leaves_no_sink_directory_behind(temp_root) -> None:
+    player = _FakePlayer(fail_with="kein Gerät")
+
+    async def go():
+        sink = PipeWireAudioSink(player)
+        with pytest.raises(TTSError):
+            await sink.play(AudioChunk(request_id="r", sequence=0, pcm=_pcm(400)))
+        await sink.close()
+
+    asyncio.run(go())
+    assert _dirs(temp_root, "kiki-sink-") == []
+
+
+def test_a_cancelled_task_leaves_no_sink_directory_behind(temp_root) -> None:
+    player = _FakePlayer(auto_eos=False)
+
+    async def go():
+        sink = PipeWireAudioSink(player)
+        task = asyncio.create_task(
+            sink.play(AudioChunk(request_id="r", sequence=0, pcm=_pcm(48_000)))
+        )
+        await _until_playing(player)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await sink.close()
+
+    asyncio.run(go())
+    assert _dirs(temp_root, "kiki-sink-") == []
+
+
+def test_stop_then_close_leaves_no_sink_directory_behind(temp_root) -> None:
+    player = _FakePlayer(auto_eos=False)
+
+    async def go():
+        sink = PipeWireAudioSink(player)
+        task = asyncio.create_task(
+            sink.play(AudioChunk(request_id="r", sequence=0, pcm=_pcm(48_000)))
+        )
+        await _until_playing(player)
+        await sink.stop()
+        await task
+        await sink.close()
+
+    asyncio.run(go())
+    assert _dirs(temp_root, "kiki-sink-") == []
+
+
+def test_a_controller_shutdown_clears_the_sink_directory(temp_root) -> None:
+    provider, _ = _provider(pcm=_pcm(24_000), chunk_seconds=0.25)
+    player = _FakePlayer()
+    sink = PipeWireAudioSink(player)
+
+    async def go():
+        await provider.load()
+        controller = VoicePlaybackController(provider, sink)
+        await controller.speak(TTSRequest(text="Und tschüss."))
+        await controller.shutdown()
+        await provider.unload()
+
+    asyncio.run(go())
+    assert _dirs(temp_root, "kiki-sink-") == []
+    assert _dirs(temp_root, "kiki-tts-") == []
+
+
+def test_a_forgotten_unload_is_cleaned_up_when_the_adapter_is_collected(temp_root) -> None:
+    """The leak itself: mkdtemp had no owner, so a provider that was simply
+    dropped left its directory in /tmp for good."""
+    import gc
+
+    def _use() -> None:
+        provider, _ = _provider()
+        _collect(provider, TTSRequest(text="Und weg."))
+        assert len(_dirs(temp_root, "kiki-tts-")) == 1
+        # no unload(), no close() — exactly what production did
+
+    _use()
+    gc.collect()
+
+    assert _dirs(temp_root, "kiki-tts-") == []
+
+
+def test_repeated_use_does_not_grow_the_temp_root(temp_root) -> None:
+    """The shape of the reported bug: hundreds of empty kiki-tts-* directories.
+    Twenty cycles must leave the root exactly as they found it."""
+    import gc
+
+    for _ in range(20):
+        provider, _ = _provider()
+        _collect(provider, TTSRequest(text="Immer wieder."))
+        asyncio.run(provider.unload())
+    gc.collect()
+
+    assert list(temp_root.iterdir()) == []
+
+
+def test_an_unloaded_provider_takes_a_fresh_directory_next_time(temp_root) -> None:
+    provider, _ = _provider()
+    _collect(provider, TTSRequest(text="Erste Runde."))
+    first = _dirs(temp_root, "kiki-tts-")[0]
+    asyncio.run(provider.unload())
+
+    asyncio.run(provider.load())
+    _collect(provider, TTSRequest(text="Zweite Runde."))
+    second = _dirs(temp_root, "kiki-tts-")[0]
+
+    assert second != first
+    asyncio.run(provider.unload())
+    assert _dirs(temp_root, "kiki-tts-") == []
+
+
+def test_a_caller_supplied_provider_directory_is_never_removed(tmp_path: Path) -> None:
+    """Deleting a directory the caller owns would take the director's cache with
+    it the day both share one."""
+    borrowed = tmp_path / "borrowed"
+    borrowed.mkdir()
+    provider, _ = _provider(wav_dir=borrowed)
+    _collect(provider, TTSRequest(text="Geliehen."))
+    asyncio.run(provider.unload())
+
+    assert borrowed.is_dir()
+    assert list(borrowed.iterdir()) == []
+
+
+def test_the_directory_is_removed_when_the_process_ends(tmp_path: Path, temp_root) -> None:
+    """The ordered-shutdown case: a service that exits without calling unload()
+    must still leave nothing behind.
+
+    TMPDIR points the child at the same injected root, so nothing touches the
+    real /tmp here either.
+    """
+    root = temp_root
+    probe = """
+import asyncio, sys, wave
+from pathlib import Path
+from kiki.voice.tts.adapters import ServiceTTSProvider
+from kiki.voice.tts.models import TTSRequest
+from kiki.voice.tts_client import TtsHealth
+
+async def _synth(base_url, text, *, dest, language, speaker, timeout):
+    with wave.open(str(dest), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)
+        w.writeframes(b"\\x01\\x02" * 2400)
+    return Path(dest)
+
+async def _health(base_url, **k):
+    return TtsHealth(ok=True, ready=True, detail="")
+
+async def main():
+    p = ServiceTTSProvider(synthesize=_synth, health=_health)
+    await p.load()
+    async for _c in p.synthesize(TTSRequest(text="Tschüss.")):
+        pass
+    print(p._wav_dir)          # deliberately no unload()
+
+asyncio.run(main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=PROJECT_ROOT,
+        env={"PYTHONPATH": "src", "PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+             "TMPDIR": str(root)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    created = Path(result.stdout.strip())
+
+    assert created.name.startswith("kiki-tts-")
+    assert created.parent == root          # it really went to the injected root
+    assert not created.exists()            # and the process took it with it
+    assert list(root.iterdir()) == []
