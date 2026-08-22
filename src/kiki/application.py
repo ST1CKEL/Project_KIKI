@@ -84,6 +84,8 @@ class KikiApplication(Adw.Application):
         self._bus = EventBus()
         self._machine = CharacterStateMachine()
         self._db: Database | None = None
+        # Only built when tts.use_controller_route is on; needs closing at exit.
+        self._voice_controller: object | None = None
         self._pet: PetWindow | None = None
         self._chat: ChatWindow | None = None
         self._prefs: PreferencesWindow | None = None
@@ -213,12 +215,25 @@ class KikiApplication(Adw.Application):
             # on the GTK thread during startup.
             self._bridge.submit(
                 provider.load(),
-                on_error=lambda exc: log.warning("TTS provider not ready: %s", exc),
+                on_error=self._on_voice_route_unavailable,
             )
-            return VoicePlaybackController(provider, PipeWireAudioSink())
+            self._voice_controller = VoicePlaybackController(provider, PipeWireAudioSink())
+            return self._voice_controller
         except Exception:
             log.exception("could not build the controller voice route — staying on the old one")
             return None
+
+    def _on_voice_route_unavailable(self, exc: BaseException) -> None:
+        """The opt-in route could not be brought up. Go back to the old one.
+
+        Without this the flag would stay on and every single sentence would fail
+        with `not_ready` — speech off, rather than speech the old way. The
+        message comes from the adapter, which already strips URLs; no
+        configuration value is logged here.
+        """
+        log.warning("controller voice route unavailable, using the file route: %s", exc)
+        if self._speech is not None:
+            self._speech.disable_controller_route()
 
     def _install_css(self) -> None:
         provider = Gtk.CssProvider()
@@ -883,6 +898,26 @@ class KikiApplication(Adw.Application):
         if self._machine.state in {CharacterState.SPEAKING, CharacterState.THINKING}:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
 
+    def _close_voice_controller(self) -> None:
+        """Release provider and sink at shutdown, without stalling GTK.
+
+        Handed to the bridge rather than awaited: the remaining teardown steps
+        give the loop its turns, and `bridge.stop()` afterwards cancels and
+        gathers whatever is left. `shutdown()` is idempotent, so a second call
+        from anywhere costs nothing.
+        """
+        controller = self._voice_controller
+        if controller is None:
+            return
+        self._voice_controller = None
+        try:
+            self._bridge.submit(
+                controller.shutdown(),
+                on_error=lambda exc: log.debug("voice controller shutdown failed: %s", exc),
+            )
+        except Exception:
+            log.debug("could not hand the voice shutdown to the bridge", exc_info=True)
+
     def _on_tts_error(self, exc: BaseException) -> None:
         message = str(exc) if not isinstance(exc, TtsError) else str(exc)
         log.warning("tts: %s", message)
@@ -890,6 +925,7 @@ class KikiApplication(Adw.Application):
 
     def _on_shutdown(self, *_args: object) -> None:
         self.stop_speech()
+        self._close_voice_controller()
         # Release the microphone and the poll loop before the bridge goes away.
         self._stop_wake()
         if self._watch is not None:
@@ -902,6 +938,7 @@ class KikiApplication(Adw.Application):
         self._bridge.stop()
         if self._db is not None:
             self._db.close()
+
 
 
 def run_application(argv: list[str] | None = None) -> int:

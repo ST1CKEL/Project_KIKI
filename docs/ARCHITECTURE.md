@@ -297,6 +297,31 @@ einem Markdown-Link. Der erste Chunk wird früh geschnitten, weil die Stille vor
 dem ersten Ton praktisch seine Länge ist; spätere Chunks bleiben länger, damit
 die Betonung natürlich bleibt.
 
+### Offen: `on_audio_started` (nächster Voice-Slice)
+
+`on_speaking` bedeutet auf den beiden Routen **nicht dasselbe**:
+
+| Route | Was `on_speaking` heißt |
+|---|---|
+| Dateiroute (Standard) | Das fertige WAV geht gerade an den Player — Ton läuft oder beginnt in Millisekunden. |
+| Controller-Route (opt-in) | Der Auftrag wurde angenommen und übergeben. Die Synthese hat noch nicht begonnen; hörbar ist nichts. |
+
+Die Character-State-Machine wechselt heute bei `on_speaking` von `thinking` auf
+`speaking`. Auf der Controller-Route animiert KIKI damit, während sie noch
+stumm synthetisiert — bei kaltem GPU-Dienst mehrere Sekunden lang.
+
+Der nächste Slice führt dafür ein eigenes Signal ein, `on_audio_started`
+(alternativ `on_playback_started`): der Sink meldet den **ersten tatsächlich
+abgespielten Chunk** durch den Controller nach oben, und erst das schaltet die
+Animation um. `on_speaking` bleibt daneben bestehen und behält seine heutige
+Bedeutung „Auftrag angenommen".
+
+Bewusst nicht in diesem Slice: das braucht einen Callback-Weg vom `AudioSink`
+durch den `VoicePlaybackController` und eine Änderung an der State-Machine —
+beides Dinge, die der Flag-Slice nicht anfassen durfte. Der Vertrag ist in
+`SpeechDirector` als `TODO(voice-slice-next)` markiert und in
+`tests/test_voice_route_flag.py` festgenagelt.
+
 ### Phase 2H — Eigener LLM-Harness
 
 `services/kiki-llm/` ist KIKIs eigene Modell-Laufzeit auf PyTorch/transformers —

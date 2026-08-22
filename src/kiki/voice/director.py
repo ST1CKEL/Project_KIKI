@@ -73,7 +73,24 @@ def service_is_down(exc: BaseException) -> bool:
 
 
 class SpeechDirector:
-    """Queue complete sentences, speak them in order, support barge-in."""
+    """Queue complete sentences, speak them in order, support barge-in.
+
+    **What the signals mean, per route.** `on_idle` is the same on both: the
+    utterance finished, was cancelled, or failed. `on_speaking` is not:
+
+    * file route — the finished WAV is being handed to the player, so audio is
+      either running or about to run within milliseconds;
+    * controller route — the request was *accepted and handed over*. Synthesis
+      has not started. Nothing audible exists yet, and on a cold GPU service the
+      first sample can be seconds away.
+
+    TODO(voice-slice-next) — `on_audio_started` / `on_playback_started`:
+    the character state machine should leave `thinking` only when the sink
+    actually plays its first chunk, not when the request is accepted. That needs
+    a callback from the sink through the controller, which is deliberately out
+    of scope here. Until then `on_speaking` on the controller route must not be
+    read as "KIKI is audible" — see tests/test_voice_route_flag.py.
+    """
 
     def __init__(
         self,
@@ -119,6 +136,20 @@ class SpeechDirector:
         # text queue and nothing else — no WAV queue, no _synth_busy.
         self._route_busy = False
         self._route_handle: CancelHandle | None = None
+
+    def disable_controller_route(self) -> None:
+        """Fall back to the file route for good.
+
+        Called when the opt-in route proved unusable — a provider that never
+        loaded fails every sentence. One-way on purpose: a failure must never
+        silently re-enable the flag later.
+        """
+        with self._lock:
+            self._use_controller = False
+
+    @property
+    def uses_controller_route(self) -> bool:
+        return self._use_controller
 
     @property
     def active(self) -> bool:

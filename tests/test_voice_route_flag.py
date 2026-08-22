@@ -8,6 +8,7 @@ towards the UI while using none of the file-based machinery.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -596,3 +597,336 @@ def test_the_file_route_behaves_identically_with_and_without_a_controller(
     player.finish()
     assert events[-1] == "idle"
     assert director.active is False
+
+
+# --- what the signals actually promise --------------------------------------
+
+
+def test_on_speaking_precedes_the_first_audio_chunk(tmp_path: Path) -> None:
+    """On the controller route `on_speaking` means "accepted", not "audible".
+
+    The order is pinned here so the day someone wires the character animation to
+    real audio (`on_audio_started`, see docs/ARCHITECTURE.md) the change is
+    visible as a failing test rather than a silent behaviour shift.
+    """
+    import wave
+
+    from kiki.voice.tts.adapters import PipeWireAudioSink, ServiceTTSProvider
+    from kiki.voice.tts.controller import VoicePlaybackController
+    from kiki.voice.tts_client import TtsHealth
+
+    timeline: list[str] = []
+
+    async def _synth(base_url, text, *, dest, language, speaker, timeout):
+        timeline.append("synthesis")
+        with wave.open(str(dest), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24_000)
+            wav.writeframes(b"\x01\x02" * 2400)
+        return Path(dest)
+
+    async def _health(base_url, **_kwargs):
+        return TtsHealth(ok=True, ready=True, detail="")
+
+    class _Player:
+        def play(self, path, *, on_eos=None, on_error=None):
+            timeline.append("audio")
+            if on_eos is not None:
+                on_eos()
+
+        def stop(self) -> None:
+            pass
+
+    async def go():
+        provider = ServiceTTSProvider(
+            synthesize=_synth, health=_health, wav_dir=tmp_path / "tts", chunk_seconds=0.05
+        )
+        await provider.load()
+        controller = VoicePlaybackController(
+            provider, PipeWireAudioSink(_Player(), wav_dir=tmp_path / "sink")
+        )
+        loop = asyncio.get_running_loop()
+        finished = asyncio.Event()
+
+        def _submit(coro, *, on_success=None, on_error=None, on_complete=None):
+            async def _run():
+                try:
+                    result = await coro
+                except Exception as exc:
+                    if on_error is not None:
+                        on_error(exc)
+                else:
+                    if on_success is not None:
+                        on_success(result)
+                if on_complete is not None:
+                    on_complete()
+
+            loop.create_task(_run())
+            return _Handle()
+
+        def _idle() -> None:
+            timeline.append("idle")
+            finished.set()
+
+        director = SpeechDirector(
+            synthesize=_synth_ok,
+            player=_FakePlayer(),
+            submit=_submit,
+            wav_dir=tmp_path / "unused",
+            on_speaking=lambda: timeline.append("speaking"),
+            on_idle=_idle,
+            controller=controller,
+            use_controller_route=True,
+        )
+        director.say("Guten Abend.")
+        await asyncio.wait_for(finished.wait(), timeout=5)
+        await controller.shutdown()
+
+    asyncio.run(go())
+
+    assert timeline[0] == "speaking"
+    # Synthesis has not even started when the signal fires — claiming audio
+    # exists at this point would be false.
+    assert timeline.index("speaking") < timeline.index("synthesis")
+    assert timeline.index("synthesis") < timeline.index("audio")
+    assert timeline[-1] == "idle"
+
+
+def test_on_idle_waits_for_the_utterance_to_finish(tmp_path: Path) -> None:
+    controller = _FakeController()
+    submit = _DeferredSubmit()
+    events: list[str] = []
+    director, _player = _director(
+        tmp_path, controller=controller, flag=True, submit=submit, events=events
+    )
+    director.say("Ein Satz.")
+
+    assert events == ["speaking"]          # accepted, not finished
+    submit.run_all()
+    assert events == ["speaking", "idle"]
+
+
+def test_on_idle_also_follows_a_cancel(tmp_path: Path) -> None:
+    controller = _FakeController(auto_finish=False)
+    submit = _DeferredSubmit()
+    events: list[str] = []
+    director, _player = _director(
+        tmp_path, controller=controller, flag=True, submit=submit, events=events
+    )
+    director.say("Ein Satz.")
+    director.stop()
+
+    assert events == ["speaking", "idle"]
+    submit.run_all()
+    assert events == ["speaking", "idle"]  # the late result adds nothing
+
+
+def test_a_late_result_never_announces_speaking_again(tmp_path: Path) -> None:
+    """A callback for a superseded generation must stay silent — otherwise the
+    character would start talking after the user already interrupted."""
+    controller = _FakeController()
+    submit = _DeferredSubmit()
+    events: list[str] = []
+    director, _player = _director(
+        tmp_path, controller=controller, flag=True, submit=submit, events=events
+    )
+    director.begin()
+    director.feed("Erster Satz. Zweiter Satz! Dritter Satz?")
+    director.stop()
+    after_stop = list(events)
+
+    submit.run_all()
+
+    assert events == after_stop
+    assert events.count("speaking") == 1
+    assert director.active is False
+
+
+def test_the_file_route_announces_speaking_at_playback(tmp_path: Path) -> None:
+    """The contrast the docs describe: here the WAV exists before the signal."""
+    order: list[str] = []
+
+    class _Watching(_FakePlayer):
+        def play(self, path, *, on_eos=None, on_error=None):
+            order.append(f"audio:{path.is_file()}")
+            super().play(path, on_eos=on_eos, on_error=on_error)
+
+    director, _player = _director(
+        tmp_path, controller=None, flag=False, player=_Watching(),
+        events=order,
+    )
+    director.say("Hallo")
+
+    assert order == ["audio:True", "speaking"]
+
+
+# --- shutdown ---------------------------------------------------------------
+
+
+def test_the_route_can_be_disabled_after_a_failed_load(tmp_path: Path) -> None:
+    """A provider that never loaded fails every sentence. Falling back beats
+    losing speech, and the flag must not switch itself back on."""
+    controller = _FakeController()
+    director, player = _director(tmp_path, controller=controller, flag=True)
+    assert director.uses_controller_route is True
+
+    director.disable_controller_route()
+
+    assert director.uses_controller_route is False
+    director.say("Hallo")
+    assert controller.requests == []
+    assert len(player.played) == 1
+
+
+def test_disabling_the_route_is_idempotent(tmp_path: Path) -> None:
+    controller = _FakeController()
+    director, _player = _director(tmp_path, controller=controller, flag=True)
+    director.disable_controller_route()
+    director.disable_controller_route()
+
+    assert director.uses_controller_route is False
+
+
+def test_the_application_closes_the_controller_at_shutdown() -> None:
+    """The bridge cancels stray tasks, but only shutdown() closes the sink —
+    and an unclosed sink leaves its temporary directory behind on every run."""
+    from kiki.runtime.async_bridge import AsyncBridge
+
+    class _Recording:
+        def __init__(self) -> None:
+            self.shutdowns = 0
+
+        async def shutdown(self) -> None:
+            self.shutdowns += 1
+
+    controller = _Recording()
+    bridge = AsyncBridge()
+    bridge.start()
+    try:
+        closer = _make_closer(bridge, controller)
+        closer()
+        deadline = time.monotonic() + 3
+        while controller.shutdowns == 0 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert controller.shutdowns == 1
+        closer()  # idempotent: the reference is already gone
+        time.sleep(0.1)
+        assert controller.shutdowns == 1
+    finally:
+        bridge.stop()
+
+
+def _make_closer(bridge, controller):
+    """Runs the real `_close_voice_controller` body against a bare object.
+
+    Importing KikiApplication would pull in GTK and construct a window, so the
+    method is bound to a stand-in that carries only the two attributes it uses.
+    """
+    from kiki.application import KikiApplication
+
+    class _Stub:
+        pass
+
+    stub = _Stub()
+    stub._bridge = bridge
+    stub._voice_controller = controller
+    return lambda: KikiApplication._close_voice_controller(stub)
+
+
+def test_closing_without_a_controller_does_nothing() -> None:
+    from kiki.runtime.async_bridge import AsyncBridge
+
+    bridge = AsyncBridge()
+    closer = _make_closer(bridge, None)
+    closer()  # the bridge was never started; this must not raise
+
+
+# --- the flag must never take the app down ----------------------------------
+
+
+class _AppStub:
+    """Only the attributes `_build_voice_controller` touches."""
+
+    def __init__(self, *, url: str = "http://127.0.0.1:18765") -> None:
+        self._voice_controller = None
+        self._speech = None
+        self._submitted: list[object] = []
+        outer = self
+
+        class _Tts:
+            use_controller_route = True
+            base_url = url
+            speaker = "Serena"
+            language = "German"
+
+        class _Settings:
+            tts = _Tts()
+
+        class _Bridge:
+            def submit(self, coro, **_kwargs):
+                outer._submitted.append(coro)
+                coro.close()
+                return None
+
+        self._settings = _Settings()
+        self._bridge = _Bridge()
+
+
+def _build(stub) -> object | None:
+    from kiki.application import KikiApplication
+
+    return KikiApplication._build_voice_controller(stub)
+
+
+def test_a_broken_adapter_import_does_not_stop_the_app(monkeypatch, caplog) -> None:
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules, "kiki.voice.tts.adapters", types.ModuleType("kiki.voice.tts.adapters")
+    )
+    stub = _AppStub()
+    with caplog.at_level("ERROR"):
+        controller = _build(stub)
+
+    assert controller is None
+    assert stub._voice_controller is None
+    assert "staying on the old one" in caplog.text
+
+
+def test_the_failure_log_carries_no_configuration_values(monkeypatch, caplog) -> None:
+    import sys
+    import types
+
+    monkeypatch.setitem(
+        sys.modules, "kiki.voice.tts.adapters", types.ModuleType("kiki.voice.tts.adapters")
+    )
+    stub = _AppStub(url="https://secret.internal:18765/v1?token=sk-live-4711")
+    with caplog.at_level("DEBUG"):
+        _build(stub)
+
+    assert "secret.internal" not in caplog.text
+    assert "sk-live-4711" not in caplog.text
+
+
+def test_a_controller_that_never_built_leaves_the_file_route_running(tmp_path: Path) -> None:
+    """The end of that chain: controller=None plus flag=True is the file route,
+    not silence."""
+    director, player = _director(tmp_path, controller=None, flag=True)
+    assert director.uses_controller_route is False
+    director.say("Hallo")
+
+    assert player.texts == ["Hallo"]
+
+
+def test_the_flag_is_never_switched_on_again_by_a_failure(tmp_path: Path) -> None:
+    controller = _FakeController()
+    director, _player = _director(tmp_path, controller=controller, flag=True)
+    director.disable_controller_route()
+    director.begin()
+    director.feed("Erster Satz. Zweiter Satz!")
+    director.flush()
+
+    assert director.uses_controller_route is False
+    assert controller.requests == []
