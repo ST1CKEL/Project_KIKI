@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.projectkiki.Kiki</id>
+  <name>KIKI</name>
+  <summary>Freundliches 2D-KI-Desktop-Pet für Fedora Linux</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.projectkiki">
+    <name>Project KIKI</name>
+  </developer>
+  <description>
+    <p>
+      KIKI ist eine weiblich gestaltete 2D-Figur, die als kleines Overlay auf dem
+      Fedora-Desktop lebt. Sie chattet lokal über Ollama, zeigt ihren Zustand
+      mit Animationen und führt keine Systemänderungen ohne Bestätigung aus.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.projectkiki.Kiki.desktop</launchable>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <recommends>
+    <display_length compare="ge">768</display_length>
+  </recommends>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.8.0" date="2026-08-22">
+      <description>
+        <p>KIKI bringt eine eigene Modell-Laufzeit mit: schnellere Antworten ohne Umweg über Ollama, mehrere Anfragen gleichzeitig und ein Kontextfenster, das sich nach dem Anliegen richtet.</p>
+      </description>
+    </release>
+    <release version="0.7.0" date="2026-08-22">
+      <description>
+        <p>KIKI öffnet Ordner, Dateien, Terminal, Editor und Links auf Wunsch selbst — nur in registrierten Workspaces. Außerdem repariert: die Einrichtung der GPU-Sprachausgabe aus dem installierten Paket.</p>
+      </description>
+    </release>
+    <release version="0.6.0" date="2026-08-22">
+      <description>
+        <p>KIKI ruft lesende Statuswerkzeuge selbst auf, hört auf Wunsch auf das Weckwort „KIKI“, merkt sich freigegebene Notizen und meldet knappen Akku oder Speicher von sich aus.</p>
+      </description>
+    </release>
+    <release version="0.5.0" date="2026-08-22">
+      <description>
+        <p>Kontrollierte PC-Aktionen mit Einzelfreigabe, gehärtetes Sprachmodell-Setup und vollständiger Fedora-44-Installer.</p>
+      </description>
+    </release>
+    <release version="0.4.0" date="2026-08-22">
+      <description>
+        <p>Verbindliches Plan-First, begrenzte sichtbare Testausgabe, sicherere Session-Bindung und abbrechbare TTS-Synthese.</p>
+      </description>
+    </release>
+    <release version="0.3.0" date="2026-08-22">
+      <description>
+        <p>Erwachseneres KIKI-Design mit vollständigem Satz ausdrucksstarker Desktop-Reaktionen.</p>
+      </description>
+    </release>
+    <release version="0.2.0" date="2026-08-22">
+      <description>
+        <p>Robustere Spracheingabe und -ausgabe, überarbeitete Persona sowie flüssigere PET-Reaktionen.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-08-21">
+      <description>
+        <p>Erste installierbare Fedora-Version von KIKI.</p>
+      </description>
+    </release>
+  </releases>
+</component>

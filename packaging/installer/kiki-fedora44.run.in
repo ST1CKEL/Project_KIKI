@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+# Self-extracting KIKI installer for Fedora 44 x86_64.
+# The RPM payload is appended by scripts/build-fedora-installer.sh.
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+KIKI_VERSION="@KIKI_VERSION@"
+KIKI_RPM_SHA256="@KIKI_RPM_SHA256@"
+KIKI_RPM_SIZE="@KIKI_RPM_SIZE@"
+KIKI_RPM_NEVRA="kiki-@KIKI_VERSION@-1.fc44.x86_64"
+PAYLOAD_MARKER="__KIKI_RPM_PAYLOAD_BELOW__"
+MODEL="qwen3-vl:4b"
+ASSUME_YES=0
+ALLOW_UNSUPPORTED=0
+VERIFY_ONLY=0
+DRY_RUN=0
+PREPARE_VOICE=1
+PREPARE_MODEL=1
+PREPARE_OPENCODE=1
+WITH_GPU_TTS=0
+INSTALL_TMP=""
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'WARNUNG: %s\n' "$*" >&2; }
+die() { printf 'FEHLER: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+KIKI ${KIKI_VERSION} – Komplettinstaller für Fedora 44 x86_64
+
+Aufruf: $0 [Optionen]
+
+  --yes                    Rückfragen bejahen (für beaufsichtigte Automation)
+  --model NAME             qwen3-vl:2b, qwen3-vl:4b (Standard) oder qwen3-vl:8b
+  --skip-voice-model       deutsches Vosk-Modell nicht vorladen
+  --skip-ollama-model      Ollama nicht starten und kein Chatmodell laden
+  --skip-opencode-cli      OpenCode-Terminal-CLI nicht ergänzen/prüfen
+  --with-gpu-tts           optionales NVIDIA/CUDA-Qwen3-TTS einrichten
+  --allow-unsupported      Fedora-/Versionsprüfung nur als Warnung behandeln
+  --dry-run                geplante Systembefehle zeigen, nichts installieren
+  --verify-only            eingebettetes RPM nur prüfen und wieder entfernen
+  --help                    diese Hilfe anzeigen
+
+Der Installer bettet KIKIs RPM ein. Fedora-Pakete werden aus den bereits
+konfigurierten DNF-Paketquellen bezogen. Ollama sowie KI- und Sprachmodelle
+benötigen Netzwerk und werden erst nach sichtbarer Zustimmung eingerichtet.
+Die OpenCode-Desktop-App wird nicht entfernt oder überschrieben.
+EOF
+}
+
+cleanup() {
+  if [[ -n "$INSTALL_TMP" && -d "$INSTALL_TMP" ]]; then
+    case "$INSTALL_TMP" in
+      /tmp/kiki-installer.*) rm -rf -- "$INSTALL_TMP" ;;
+    esac
+  fi
+}
+trap cleanup EXIT
+
+quote_command() {
+  printf '  '
+  printf '%q ' "$@"
+  printf '\n'
+}
+
+run_command() {
+  if (( DRY_RUN )); then
+    quote_command "$@"
+    return 0
+  fi
+  "$@"
+}
+
+confirm() {
+  local prompt="$1" answer=""
+  if (( ASSUME_YES )); then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    die "Keine interaktive Eingabe. Nutze --yes oder führe den Installer im Terminal aus."
+  fi
+  read -r -p "$prompt [j/N] " answer
+  answer="${answer,,}"
+  [[ "$answer" == "j" || "$answer" == "ja" || "$answer" == "y" || "$answer" == "yes" ]]
+}
+
+need_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Benötigtes Programm fehlt: $1"
+}
+
+validate_platform() {
+  local os_id="" os_version="" arch=""
+  if [[ -r /etc/os-release ]]; then
+    # /etc/os-release is root-owned platform metadata on Fedora.
+    . /etc/os-release
+    os_id="${ID:-}"
+    os_version="${VERSION_ID:-}"
+  fi
+  arch="$(uname -m)"
+  if [[ "$arch" != "x86_64" ]]; then
+    die "Dieser Installer enthält ein x86_64-RPM (erkannt: ${arch:-?})."
+  fi
+  if [[ "$os_id" != "fedora" || "$os_version" != "44" ]]; then
+    if (( ALLOW_UNSUPPORTED )); then
+      warn "Getestet ist Fedora 44; erkannt: ${os_id:-?} ${os_version:-?}."
+    else
+      die "Dieser Installer ist nur für Fedora 44 (erkannt: ${os_id:-?} ${os_version:-?})."
+    fi
+  fi
+}
+
+extract_and_verify_rpm() {
+  local payload_line="" rpm_path="$INSTALL_TMP/kiki-${KIKI_VERSION}.x86_64.rpm"
+  payload_line="$(awk -v marker="$PAYLOAD_MARKER" '$0 == marker { print NR + 1; exit }' "$0")"
+  [[ "$payload_line" =~ ^[0-9]+$ ]] || die "RPM-Nutzlast fehlt."
+  tail -n "+$payload_line" "$0" > "$rpm_path"
+  local actual_size actual_sha header
+  actual_size="$(wc -c < "$rpm_path")"
+  [[ "$actual_size" == "$KIKI_RPM_SIZE" ]] || die "RPM-Größe stimmt nicht."
+  actual_sha="$(sha256sum "$rpm_path" | awk '{print $1}')"
+  [[ "$actual_sha" == "$KIKI_RPM_SHA256" ]] || die "RPM-Prüfsumme stimmt nicht."
+  header="$(rpm -qp --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}' "$rpm_path")"
+  [[ "$header" == "$KIKI_RPM_NEVRA" ]] || die "Unerwarteter RPM-Header: $header"
+  printf '%s\n' "$rpm_path"
+}
+
+portal_backend_package() {
+  local desktop="${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-}}"
+  case "${desktop,,}" in
+    *kde*|*plasma*) printf '%s\n' "xdg-desktop-portal-kde" ;;
+    *gnome*) printf '%s\n' "xdg-desktop-portal-gnome" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+install_fedora_packages() {
+  local rpm_path="$1" backend=""
+  backend="$(portal_backend_package)"
+  local -a packages=(
+    curl
+    gnome-keyring
+    gstreamer1
+    gstreamer1-plugins-base
+    gstreamer1-plugins-good
+    pipewire-pulseaudio
+    pipewire-utils
+    vosk-api-devel
+    xdg-desktop-portal
+    xdg-terminal-exec
+    xdg-utils
+  )
+  if [[ -n "$backend" ]]; then
+    packages+=("$backend")
+  fi
+  local -a command=(sudo dnf install --setopt=install_weak_deps=False)
+  if (( ASSUME_YES )); then
+    command+=(-y)
+  fi
+  command+=("$rpm_path" "${packages[@]}")
+  say "Fedora-Pakete und KIKI installieren:"
+  run_command "${command[@]}"
+}
+
+find_opencode_cli() {
+  local candidate=""
+  candidate="$(command -v opencode 2>/dev/null || true)"
+  if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  for candidate in "$HOME/.local/bin/opencode" "$HOME/.opencode/bin/opencode"; do
+    if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+prepare_opencode_cli() {
+  local binary="" installer="$INSTALL_TMP/opencode-install.sh"
+  if binary="$(find_opencode_cli)"; then
+    say "OpenCode-Terminal-CLI: $($binary --version 2>&1 | head -n 1)"
+    return 0
+  fi
+  warn "OpenCode Desktop ist nicht die von KIKI benötigte Terminal-CLI ('opencode run')."
+  if ! confirm "Offizielle OpenCode-Terminal-CLI von opencode.ai installieren?"; then
+    warn "Coding-Sessions bleiben deaktiviert; die übrige KIKI-App funktioniert."
+    return 0
+  fi
+  if (( DRY_RUN )); then
+    say "  Download https://opencode.ai/install -> $installer"
+    say "  bash $installer"
+    return 0
+  fi
+  curl --fail --silent --show-error --location \
+    --proto '=https' --tlsv1.2 \
+    https://opencode.ai/install --output "$installer"
+  bash "$installer"
+  binary="$(find_opencode_cli)" || die "OpenCode-CLI wurde nach der Installation nicht gefunden."
+  say "OpenCode-Terminal-CLI bereit: $($binary --version 2>&1 | head -n 1)"
+}
+
+ollama_api_ready() {
+  curl --fail --silent --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1
+}
+
+ensure_ollama() {
+  if command -v ollama >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "Ollama ist noch nicht installiert. Fedoras Paket enthält die lokale KI-Laufzeit."
+  warn "Je nach Fedora-Paketstand können Ollama und GPU-Bibliotheken mehrere GB belegen."
+  if ! confirm "Fedora-Paket 'ollama' jetzt installieren?"; then
+    return 1
+  fi
+  local -a command=(sudo dnf install --setopt=install_weak_deps=False)
+  if (( ASSUME_YES )); then
+    command+=(-y)
+  fi
+  command+=(ollama)
+  say "Optionale lokale KI-Laufzeit installieren:"
+  run_command "${command[@]}"
+  if (( DRY_RUN )); then
+    return 0
+  fi
+  command -v ollama >/dev/null 2>&1 || die "Ollama wurde nach der Installation nicht gefunden."
+}
+
+create_ollama_user_service() {
+  local binary="$1" unit_dir="$HOME/.config/systemd/user"
+  local unit="$unit_dir/kiki-ollama.service"
+  [[ "$binary" != *[[:space:]]* ]] || die "Ollama-Pfad mit Leerzeichen wird nicht unterstützt: $binary"
+  if [[ -e "$unit" ]] && ! grep -q '^# Managed by KIKI installer$' "$unit"; then
+    die "Vorhandene fremde Unit wird nicht überschrieben: $unit"
+  fi
+  mkdir -p "$unit_dir"
+  {
+    printf '%s\n' '# Managed by KIKI installer'
+    printf '%s\n' '[Unit]' 'Description=Ollama for KIKI' 'After=network-online.target'
+    printf '%s\n' '[Service]' "ExecStart=$binary serve" 'Restart=on-failure' 'RestartSec=3'
+    printf '%s\n' '[Install]' 'WantedBy=default.target'
+  } > "$unit"
+  systemctl --user daemon-reload
+  systemctl --user enable --now kiki-ollama.service
+}
+
+start_ollama() {
+  local binary=""
+  binary="$(command -v ollama 2>/dev/null || true)"
+  if [[ -z "$binary" && "$DRY_RUN" == "1" ]]; then
+    binary="/usr/bin/ollama"
+  fi
+  [[ -n "$binary" && -x "$binary" ]] || die "Ollama fehlt trotz Fedora-Paketinstallation."
+  if ollama_api_ready; then
+    return 0
+  fi
+  if systemctl list-unit-files ollama.service --no-legend 2>/dev/null | grep -q '^ollama.service'; then
+    run_command sudo systemctl enable --now ollama.service
+  elif (( DRY_RUN )); then
+    say "  systemctl --user enable --now kiki-ollama.service ($binary serve)"
+    return 0
+  else
+    create_ollama_user_service "$binary"
+  fi
+  if (( DRY_RUN )); then
+    return 0
+  fi
+  local attempt
+  for attempt in {1..20}; do
+    if ollama_api_ready; then
+      return 0
+    fi
+    sleep 1
+  done
+  die "Ollama antwortet nicht auf http://127.0.0.1:11434."
+}
+
+prepare_models() {
+  if (( PREPARE_VOICE )); then
+    say "Deutsches Offline-Sprachmodell vorbereiten (~45 MB):"
+    run_command env PYTHONNOUSERSITE=1 kiki --prepare-voice-model
+  fi
+  if (( PREPARE_MODEL )); then
+    if ! confirm "Ollama starten und ${MODEL} herunterladen (je nach Profil ca. 1,9–6,1 GB)?"; then
+      warn "Lokaler Chat bleibt bis 'kiki-setup-model $MODEL' ohne Modell."
+    else
+      if ! ensure_ollama; then
+        warn "Ollama wurde übersprungen; lokaler Chat bleibt vorerst ohne Laufzeit."
+        return 0
+      fi
+      start_ollama
+      say "Lokales Chat-/Vision-Modell laden: $MODEL"
+      run_command ollama pull "$MODEL"
+      if (( ! DRY_RUN )); then
+        ollama show "$MODEL" >/dev/null || die "Ollama-Modellprüfung fehlgeschlagen: $MODEL"
+      fi
+    fi
+  fi
+}
+
+prepare_gpu_tts() {
+  (( WITH_GPU_TTS )) || return 0
+  need_command nvidia-smi
+  nvidia-smi >/dev/null 2>&1 || die "NVIDIA-Treiber/CUDA ist nicht einsatzbereit. GPU-TTS wird nicht installiert."
+  if ! confirm "Optionales Qwen3-TTS-CUDA-Profil installieren (großer Download)?"; then
+    return 0
+  fi
+  run_command kiki-setup-tts
+}
+
+postflight() {
+  (( DRY_RUN )) && return 0
+  local element
+  for element in pulsesrc audioconvert audioresample wavenc wavparse pulsesink; do
+    gst-inspect-1.0 "$element" >/dev/null 2>&1 || die "GStreamer-Element fehlt: $element"
+  done
+  command -v xdg-open >/dev/null 2>&1 || die "xdg-open fehlt."
+  command -v xdg-terminal-exec >/dev/null 2>&1 || die "xdg-terminal-exec fehlt."
+  if (( PREPARE_VOICE )); then
+    env PYTHONNOUSERSITE=1 kiki --check --strict
+  else
+    env PYTHONNOUSERSITE=1 kiki --check
+  fi
+  if (( PREPARE_OPENCODE )); then
+    local binary=""
+    if binary="$(find_opencode_cli)"; then
+      "$binary" --version
+    else
+      warn "OpenCode-CLI wurde übersprungen; Coding-Sessions sind nicht verfügbar."
+    fi
+  fi
+  if (( PREPARE_MODEL )) && ollama_api_ready; then
+    ollama show "$MODEL" >/dev/null || warn "Das gewählte Ollama-Modell wurde übersprungen."
+  fi
+}
+
+main() {
+  while (($#)); do
+    case "$1" in
+      --yes) ASSUME_YES=1 ;;
+      --model)
+        (($# >= 2)) || die "--model benötigt einen Wert."
+        MODEL="$2"
+        shift
+        ;;
+      --skip-voice-model) PREPARE_VOICE=0 ;;
+      --skip-ollama-model) PREPARE_MODEL=0 ;;
+      --skip-opencode-cli) PREPARE_OPENCODE=0 ;;
+      --with-gpu-tts) WITH_GPU_TTS=1 ;;
+      --allow-unsupported) ALLOW_UNSUPPORTED=1 ;;
+      --dry-run) DRY_RUN=1 ;;
+      --verify-only) VERIFY_ONLY=1 ;;
+      --help|-h) usage; exit 0 ;;
+      *) die "Unbekannte Option: $1" ;;
+    esac
+    shift
+  done
+  case "$MODEL" in
+    qwen3-vl:2b|qwen3-vl:4b|qwen3-vl:8b) ;;
+    *) die "Nicht freigegebenes Modellprofil: $MODEL" ;;
+  esac
+  need_command awk
+  need_command rpm
+  need_command sha256sum
+  need_command tail
+  need_command wc
+  validate_platform
+  INSTALL_TMP="$(mktemp -d /tmp/kiki-installer.XXXXXX)"
+  local rpm_path=""
+  rpm_path="$(extract_and_verify_rpm)"
+  say "Eingebettetes RPM geprüft: $KIKI_RPM_NEVRA"
+  if (( VERIFY_ONLY )); then
+    say "Installer-Nutzlast ist intakt (SHA-256 $KIKI_RPM_SHA256)."
+    exit 0
+  fi
+  if (( EUID == 0 )); then
+    die "Nicht als root starten. Der Installer verwendet sudo nur für den DNF-/Dienstschritt."
+  fi
+  need_command dnf
+  need_command sudo
+  say
+  say "KIKI installiert nur deklarierte Desktop-Aktionen mit Einzelfreigabe."
+  say "Keine globale Maus-/Tastatursteuerung und keine freie Shell aus Modelltext."
+  confirm "KIKI ${KIKI_VERSION} samt Fedora-Abhängigkeiten installieren?" || die "Installation abgebrochen."
+  install_fedora_packages "$rpm_path"
+  if (( PREPARE_OPENCODE )); then
+    prepare_opencode_cli
+  fi
+  prepare_models
+  prepare_gpu_tts
+  postflight
+  say
+  say "KIKI ${KIKI_VERSION} ist bereit. Start: kiki"
+  say "PC-Steuerung: Rechtsklick auf KIKI -> 'PC-Steuerung'."
+}
+
+main "$@"
+exit 0
+__KIKI_RPM_PAYLOAD_BELOW__

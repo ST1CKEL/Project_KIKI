@@ -1,0 +1,16 @@
+[Unit]
+Description=KIKI Qwen3-TTS (0.6B CustomVoice)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/kiki/tts-venv/bin/python %h/.local/share/kiki/tts/kiki_tts_server.py --host 127.0.0.1 --port 18765 --device auto
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+TimeoutStartSec=0
+
+[Install]
+WantedBy=graphical-session.target

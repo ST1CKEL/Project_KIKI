@@ -1,0 +1,225 @@
+[app]
+# Start KIKI when the user logs into GNOME (XDG autostart).
+autostart = false
+# Master kill switch: disable every integration and tool that touches the system.
+privacy_panic = false
+# Play a greet animation once after launch.
+greet_on_start = true
+
+[pet]
+# Visual scale relative to the character pack's native height (about 260 px).
+scale = 1.0
+# Request always-on-top. GNOME/Wayland cannot honour this programmatically;
+# the setting is stored and applied on X11/XWayland, and documented otherwise.
+always_on_top = true
+# Transparent pixels do not capture clicks. The figure itself stays clickable.
+click_through_idle = true
+# Preferred corner. On Wayland the compositor places the window; this is a hint
+# used on X11 and shown in the UI.
+anchor = "bottom-right"
+# Native drawing height of the pet window at scale 1.0.
+height_px = 260
+last_x = -1
+last_y = -1
+
+[character]
+id = "kiki-adult-v3"
+
+[ai]
+# "ollama" (default), "kiki_harness" (KIKI's own service) or
+# "openai_compatible" (SpaceXAI, vLLM, …).
+provider = "ollama"
+temperature = 0.7
+# Maximum history messages sent to the model (not including the system prompt).
+history_limit = 40
+# system_prompt is deliberately absent here. It holds only the *personality*
+# half and stays empty until the user writes their own; the presets live in
+# kiki/ai/persona.py and the invariant rules are never stored in this file.
+# An older config that still carries a full prompt is read as the "eigene"
+# persona, so nothing a user wrote is lost.
+
+[ai.ollama]
+base_url = "http://127.0.0.1:11434"
+# Compatible local default: German + vision (~3.3 GB). Quality profile: qwen3-vl:8b.
+model = "qwen3-vl:4b"
+# Ollama's own default is 4096 tokens. That is too tight once the system prompt,
+# memories and history are in play — a thinking model can spend the whole window
+# deliberating and answer with nothing at all. Raise for long chats, lower for
+# tight RAM.
+num_ctx = 8192
+# Let a thinking-capable model deliberate before answering. Off by default: on
+# qwen3-vl:4b, answering "say only Hallo" took 10.5 s with thinking and 4.9 s
+# without. Ignored by models that have no such mode.
+think = false
+# Prefill a closed, empty reasoning block in the assistant turn so a thinking
+# model cannot open one. Measured on qwen3-vl:4b with a real question: 43.0 s to
+# the first token without it, 0.4 s with it, and the answer stayed complete.
+# A model without a thinking mode answers identically either way.
+suppress_thinking = true
+
+[ai.kiki_harness]
+# KIKI's own LLM service: PyTorch/transformers, token-level control over
+# reasoning, priority slots and a VRAM budget shared with the TTS service.
+# Loopback only. Set up with scripts/setup-llm.sh.
+base_url = "http://127.0.0.1:18770"
+model = "Qwen/Qwen3-4B-Instruct-2507"
+# int4 keeps a 4B model near 2 GB; "none" is bf16 at roughly 8 GB.
+quantize = "int4"
+slots = 2
+
+[ai.openai_compatible]
+# SpaceXAI (xAI) is the recommended external provider. Other OpenAI-compatible
+# endpoints work too — change base_url and model, store the key in Keyring.
+base_url = "https://api.x.ai/v1"
+model = "grok-4.5"
+
+[integrations]
+# Global enable. ANDed with app.privacy_panic (panic wins).
+enabled = true
+# If false, status data is never collected unless the user clicks "Status anhängen".
+status_cards = true
+
+[integrations.datetime]
+enabled = true
+
+[integrations.upower]
+enabled = true
+
+[integrations.networkmanager]
+enabled = true
+
+[integrations.disk]
+enabled = true
+path = ""
+
+[tools]
+# Let the model request tools itself. Only tools declared model_callable are
+# reachable, and the policy still decides allow / confirm / deny per call.
+model_tool_use = true
+# How far a model-initiated call gets without a dialog.
+#   "strict"   — reading only.
+#   "balanced" — reading plus the declared safety controls.
+#   "trusted"  — additionally opening folders, files, a terminal, the editor and
+#                http(s) links, and only inside registered workspaces.
+# Writing and external actions always show the approval card, at every level.
+autonomy = "balanced"
+# Hard bounds per turn, so a confused model cannot spin.
+max_steps = 6
+max_tool_calls = 12
+
+[screenshot]
+# User must click. Portal or Spectacle then asks again on Wayland/GNOME/KDE.
+enabled = true
+interactive = true
+
+[voice]
+# Push-to-talk / toggle.
+enabled = true
+auto_send = true
+
+[voice.wake]
+# Always-on listening for "KIKI". Off by default: an open microphone is the
+# user's decision, not something an update switches on. Everything stays local
+# and nothing is written to disk, but while armed KIKI does run local speech
+# recognition continuously. Non-wake speech is matched and discarded; only the
+# utterance *after* the wake word is used.
+enabled = false
+phrases = ["kiki"]
+# Ignore further wake words for this long after a command.
+cooldown_ms = 2000
+# Give up on a spoken command after this long and go back to waiting.
+command_timeout_s = 12
+
+[voice.response_policy]
+# How much of an answer KIKI says out loud. The full answer always stays in the
+# chat; speech is a shortened, safe companion.
+#   silent   — never speak
+#   concise  — default, two sentences
+#   normal   — three sentences
+#   detailed — unlimited, only when detailed_speech is true
+default_mode = "concise"
+
+concise_max_sentences = 2
+concise_max_characters = 300
+
+normal_max_sentences = 3
+normal_max_characters = 500
+
+# Even in "detailed", stay at the normal limits unless this is switched on.
+detailed_speech = false
+
+# Never read these aloud. They stay visible in the chat.
+speak_code = false
+speak_logs = false
+speak_urls = false
+speak_paths = false
+speak_tables = false
+speak_secrets = false
+
+[tts.streaming]
+# Synthesis runs near 1.3x realtime, so the silence before KIKI starts talking
+# is roughly the first chunk's length. The first chunk is therefore cut early;
+# later chunks stay longer so prosody remains natural.
+first_chunk_target_chars = 80
+min_chunk_chars = 55
+max_chunk_chars = 180
+# Give the stream this long to offer a better boundary before settling for a
+# clause break.
+max_wait_ms = 500
+
+# At most one chunk is produced ahead of the one being played.
+prefetch_chunks = 1
+cancel_pending_on_interrupt = true
+
+[tts]
+# Local Qwen3-TTS service (GPU). The GTK process never loads PyTorch.
+enabled = true
+base_url = "http://127.0.0.1:18765"
+# 0.6B CustomVoice. Serena = warm, gentle young female (best KIKI match).
+speaker = "Serena"
+language = "German"
+# Start speaking as soon as a sentence has streamed from the chat model.
+stream_sentences = true
+# If the GPU service is unavailable, use Fedora's local espeak-ng voice.
+fallback_to_system = true
+
+[watch]
+# Proactive notices. KIKI may speak up on her own — she still cannot *act* on
+# her own; every system change keeps its approval card.
+enabled = true
+# Speak warnings aloud. Info-level observations never reach the speakers.
+speak = true
+interval_s = 60
+# No talking at night. Urgent notices still appear silently as a notification.
+quiet_start = "22:00"
+quiet_end = "08:00"
+# Do not repeat the same notice within this many seconds …
+cooldown_s = 1800
+# … and never exceed this many notices per hour, whatever the watchers report.
+max_per_hour = 6
+
+[watch.battery]
+enabled = true
+# Warn below this, urgent below 10 %.
+percent = 20
+
+[watch.disk]
+enabled = true
+# Warn above this usage, urgent above 96 %.
+percent = 90
+
+[workspaces]
+# Coding workspaces must sit inside one of these roots (after symlink resolve).
+# $HOME itself and / are forbidden. Unlisted paths cannot be registered.
+allowed_roots = [
+  "~/Projects",
+  "~/Code",
+  "~/Projekte",
+  "~/Dokumente/Projekte",
+]
+
+[agents]
+# OpenCode CLI. Never assembled from LLM text — only this configured path plus a fixed argv template.
+opencode_binary = "opencode"
+default_model = ""
+plan_first = true

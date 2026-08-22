@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=KIKI
+GenericName=Desktop Pet
+Comment=Freundliches 2D-KI-Desktop-Pet und Assistentin für Fedora Linux
+Exec=kiki
+TryExec=kiki
+Icon=io.github.projectkiki.Kiki
+Terminal=false
+Categories=Utility;GTK;
+Keywords=assistant;pet;chat;ollama;ai;
+StartupNotify=true
+DBusActivatable=false
+X-GNOME-UsesNotifications=true

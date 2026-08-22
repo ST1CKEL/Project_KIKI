@@ -1,0 +1,67 @@
+id = "kiki-adult-v3"
+name = "KIKI Adult v3"
+version = 3
+renderer = "frames"
+scale_anchor_px = 260
+license = "original-generated"
+notes = "Mature original KIKI design. Transparent 512 px PNG frames, stable full-body scale and foot anchor, no logos or trademarks."
+
+[states.idle]
+loop = true
+frames = ["idle/00.png", "idle_blink/00.png"]
+frame_ms = [3000, 160]
+
+[states.idle_blink]
+loop = false
+frames = ["idle_blink/00.png"]
+frame_ms = [180]
+
+[states.greet]
+loop = false
+frames = ["greet/00.png"]
+frame_ms = [1800]
+
+[states.listening]
+loop = true
+frames = ["listening/00.png"]
+frame_ms = [800]
+
+[states.thinking]
+loop = true
+frames = ["thinking/00.png", "thinking/01.png"]
+frame_ms = [520, 520]
+
+[states.speaking]
+loop = true
+frames = ["speaking/00.png", "speaking/01.png"]
+frame_ms = [280, 280]
+
+[states.happy]
+loop = false
+frames = ["happy/00.png"]
+frame_ms = [1600]
+
+[states.surprised]
+loop = false
+frames = ["surprised/00.png"]
+frame_ms = [1400]
+
+[states.sleeping]
+loop = true
+frames = ["sleeping/00.png"]
+frame_ms = [1200]
+
+[states.error]
+loop = false
+frames = ["error/00.png"]
+frame_ms = [2400]
+
+[states.notification]
+loop = false
+frames = ["notification/00.png"]
+frame_ms = [2000]
+
+[states.paused]
+loop = true
+frames = ["sleeping/00.png"]
+frame_ms = [1200]

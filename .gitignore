@@ -1,0 +1,70 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+.coverage
+htmlcov/
+*.log
+.kiki-dev/
+xdg-runtime-test/
+vendor/
+
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+
+# Local user state, logs and IPC
+var/
+state/
+logs/
+run/
+*.pid
+*.sock
+
+# Local databases, chat history and memory
+*.sqlite
+*.sqlite3
+*.db
+
+# Downloaded AI models and model caches
+models/
+model-cache/
+hf-cache/
+huggingface/
+*.gguf
+*.safetensors
+*.onnx
+*.bin
+*.pt
+*.pth
+
+# Generated audio and recording artefacts
+*.wav
+*.pcm
+*.mp3
+*.flac
+*.ogg
+
+# Generated package artefacts
+*.rpm
+*.tar.gz
+*.tar.xz
+*.AppImage
+
+# Local editor / OS artefacts
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
