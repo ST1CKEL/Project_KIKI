@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+from kiki.voice.tts.models import TTSError
 from kiki.voice.tts_client import TtsError
 from kiki.voice.tts_text import flush_buffer, speakable, split_ready
 
@@ -20,10 +21,42 @@ class CancelHandle(Protocol):
     def cancel(self) -> None: ...
 
 
+class PlayerLike(Protocol):
+    """What the director needs from a player. `PipeWirePlayer` satisfies it.
+
+    Typed as a Protocol so an alternative sink can be injected without the
+    director knowing which one it got.
+    """
+
+    def play(
+        self,
+        path: Path,
+        *,
+        on_eos: Callable[[], None] | None = None,
+        on_error: Callable[[str], None] | None = None,
+    ) -> None: ...
+
+    def stop(self) -> None: ...
+
+
 SubmitFn = Callable[..., CancelHandle | None]
 SynthFn = Callable[[str, Path], Awaitable[Path]]
 SynthJob = tuple[str, int, Path]
 PlayJob = tuple[Path, int]
+
+
+def service_is_down(exc: BaseException) -> bool:
+    """True when the whole TTS route is gone, not just one sentence.
+
+    A single failed sentence is skipped; an unreachable service resets the
+    queue and warns once. The old form of this test was a message comparison
+    inlined in `_on_synth_failed`; it stays first so the existing route behaves
+    byte-for-byte as before, and the code-based branch covers the adapter, which
+    nothing feeds into the director yet.
+    """
+    if isinstance(exc, TTSError):
+        return exc.code in {"unreachable", "timeout", "load"}
+    return isinstance(exc, TtsError) and "nicht erreichbar" in str(exc)
 
 
 class SpeechDirector:
@@ -33,12 +66,13 @@ class SpeechDirector:
         self,
         *,
         synthesize: SynthFn,
-        player: object,
+        player: PlayerLike,
         submit: SubmitFn,
         wav_dir: Path,
         on_speaking: Callable[[], None] | None = None,
         on_idle: Callable[[], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
+        service_down: Callable[[BaseException], bool] | None = None,
     ) -> None:
         self._synthesize = synthesize
         self._player = player
@@ -47,6 +81,7 @@ class SpeechDirector:
         self._on_speaking = on_speaking
         self._on_idle = on_idle
         self._on_error = on_error
+        self._service_down = service_down or service_is_down
         self._lock = threading.Lock()
         self._generation = 0
         self._buffer = ""
@@ -253,7 +288,7 @@ class SpeechDirector:
             self._emit_idle()
 
     def _on_synth_failed(self, generation: int, path: Path, exc: BaseException) -> None:
-        down = isinstance(exc, TtsError) and "nicht erreichbar" in str(exc)
+        down = self._service_down(exc)
         with self._lock:
             if generation != self._generation:
                 stale = True
