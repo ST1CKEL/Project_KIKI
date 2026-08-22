@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 
 from kiki.voice.tts import (
     AudioChunk,
+    AudioStartedEvent,
     FakeAudioSink,
     FakeTTSProvider,
     PlaybackState,
     TTSError,
+    TTSProviderStatus,
     TTSRequest,
     VoicePlaybackController,
 )
@@ -670,3 +673,321 @@ def test_an_exception_without_a_message_still_names_its_type() -> None:
     from kiki.voice.tts.controller import _safe_error
 
     assert _safe_error(RuntimeError()) == "RuntimeError"
+
+
+# --- on_audio_started -------------------------------------------------------
+
+
+def _announcing(provider, sink, **kwargs):
+    """A controller that records every AudioStartedEvent it emits."""
+    seen: list[AudioStartedEvent] = []
+    controller = VoicePlaybackController(
+        provider, sink, on_audio_started=seen.append, **kwargs
+    )
+    return controller, seen
+
+
+def test_the_first_playable_chunk_announces_itself_exactly_once() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    sink = FakeAudioSink()
+    controller, seen = _announcing(provider, sink)
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Ein etwas längerer Satz zum Testen."))
+
+    result = asyncio.run(go())
+
+    assert result.chunks > 2          # several chunks were played
+    assert len(seen) == 1             # one announcement all the same
+    assert seen[0].sequence == 0
+    assert seen[0].timestamp_monotonic > 0
+
+
+def test_the_event_carries_the_requesting_id() -> None:
+    provider = FakeTTSProvider()
+    controller, seen = _announcing(provider, FakeAudioSink())
+
+    async def go():
+        await provider.load()
+        await controller.speak(TTSRequest(text="Wer spricht?", id="req-4711"))
+
+    asyncio.run(go())
+    assert [event.request_id for event in seen] == ["req-4711"]
+
+
+def test_it_fires_before_playback_of_that_chunk_finished() -> None:
+    """Announcing only after play() returned would mean announcing after the
+    chunk was already over."""
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    order: list[str] = []
+
+    class _Slow:
+        async def play(self, chunk):
+            order.append(f"play-start-{chunk.sequence}")
+            await asyncio.sleep(0.01)
+            order.append(f"play-end-{chunk.sequence}")
+
+        async def stop(self) -> None: ...
+
+        async def close(self) -> None: ...
+
+    controller = VoicePlaybackController(
+        provider, _Slow(), on_audio_started=lambda e: order.append("announced")
+    )
+
+    async def go():
+        await provider.load()
+        await controller.speak(TTSRequest(text="Reihenfolge."))
+
+    asyncio.run(go())
+
+    assert order[0] == "play-start-0"
+    assert order[1] == "announced"
+    assert order.index("announced") < order.index("play-end-0")
+
+
+def test_a_provider_failure_before_any_chunk_announces_nothing() -> None:
+    provider = FakeTTSProvider(fail_on_synthesize=True)
+    controller, seen = _announcing(provider, FakeAudioSink())
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Geht nicht."))
+
+    result = asyncio.run(go())
+    assert result.error
+    assert seen == []
+
+
+def test_a_failing_first_chunk_does_not_announce_itself() -> None:
+    """That chunk made no sound, so it may not claim it did — but the next one
+    that really plays must, because by then KIKI genuinely is audible."""
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    sink = FakeAudioSink(fail_on_sequence={0})
+    controller, seen = _announcing(provider, sink)
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Ein Satz mit mehreren Stücken."))
+
+    result = asyncio.run(go())
+
+    assert result.error
+    assert len(seen) == 1
+    assert seen[0].sequence == 1          # not 0: that one never sounded
+    assert 0 not in sink.played_sequences
+
+
+def test_a_sink_that_fails_on_every_chunk_announces_nothing() -> None:
+    """No sound was ever made at all."""
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    sink = FakeAudioSink(fail_on_sequence=set(range(50)))
+    controller, seen = _announcing(provider, sink)
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Nichts geht."))
+
+    result = asyncio.run(go())
+
+    assert result.error
+    assert sink.played == []
+    assert seen == []
+
+
+def test_a_failure_on_a_later_chunk_does_not_announce_again() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    sink = FakeAudioSink(fail_on_sequence={2})
+    controller, seen = _announcing(provider, sink)
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Ein längerer Satz mit mehreren Stücken."))
+
+    asyncio.run(go())
+    assert len(seen) == 1
+    assert seen[0].sequence == 0
+
+
+def test_an_empty_chunk_announces_nothing() -> None:
+    """An empty chunk makes no sound and may not claim to."""
+
+    class _EmptyThenReal:
+        provider_id = "empty-first"
+
+        def __init__(self) -> None:
+            self._status = TTSProviderStatus.READY
+
+        @property
+        def status(self):
+            return self._status
+
+        def capabilities(self):
+            return FakeTTSProvider().capabilities()
+
+        async def health_check(self): ...
+
+        async def load(self) -> None: ...
+
+        async def unload(self) -> None: ...
+
+        async def cancel(self, request_id: str) -> None: ...
+
+        async def synthesize(self, request):
+            yield AudioChunk(request_id=request.id, sequence=0, pcm=b"")
+            yield AudioChunk(request_id=request.id, sequence=1, pcm=b"\x01\x02" * 240)
+
+    provider = _EmptyThenReal()
+    controller, seen = _announcing(provider, FakeAudioSink())
+
+    asyncio.run(controller.speak(TTSRequest(text="Erst nichts, dann etwas.")))
+
+    assert [event.sequence for event in seen] == [1]
+
+
+def test_a_cancel_before_any_audio_announces_nothing() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.1, latency_s=0.2)
+    controller, seen = _announcing(provider, FakeAudioSink())
+
+    async def go():
+        await provider.load()
+        task = await controller.submit(TTSRequest(text="Zu spät.", id="req-cancel"))
+        await asyncio.sleep(0)
+        await controller.cancel("req-cancel")
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert seen == []
+
+
+def test_a_cancel_during_playback_produces_no_second_event() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.05)
+    sink = FakeAudioSink(realtime=True)
+    controller, seen = _announcing(provider, sink)
+
+    async def go():
+        await provider.load()
+        request = TTSRequest(text="Ein langer Satz, der unterbrochen wird.", id="req-mid")
+        task = await controller.submit(request)
+        for _ in range(200):
+            if seen:
+                break
+            await asyncio.sleep(0.001)
+        await controller.cancel("req-mid")
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert len(seen) == 1
+
+
+def test_a_superseded_request_can_never_announce_itself() -> None:
+    """The chunk of an answer the user already talked over must not reach the
+    speakers, and must not report that it did."""
+    provider = FakeTTSProvider(chunk_seconds=0.05)
+    sink = FakeAudioSink(realtime=True)
+    controller, seen = _announcing(provider, sink)
+
+    async def go():
+        await provider.load()
+        first = await controller.submit(TTSRequest(text="Erste Antwort.", id="req-alt"))
+        await asyncio.sleep(0)
+        second = await controller.submit(TTSRequest(text="Zweite Antwort.", id="req-neu"))
+        with contextlib.suppress(asyncio.CancelledError):
+            await first
+        await second
+
+    asyncio.run(go())
+    assert [event.request_id for event in seen] == ["req-neu"]
+
+
+def test_the_next_request_after_a_cancel_announces_again() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.05)
+    controller, seen = _announcing(provider, FakeAudioSink())
+
+    async def go():
+        await provider.load()
+        await controller.cancel("nie-gesehen")
+        await controller.speak(TTSRequest(text="Erster.", id="a"))
+        await controller.speak(TTSRequest(text="Zweiter.", id="b"))
+
+    asyncio.run(go())
+    assert [event.request_id for event in seen] == ["a", "b"]
+
+
+def test_shutdown_produces_no_late_event() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.05, latency_s=0.2)
+    controller, seen = _announcing(provider, FakeAudioSink())
+
+    async def go():
+        await provider.load()
+        task = await controller.submit(TTSRequest(text="Wird beendet."))
+        await asyncio.sleep(0)
+        await controller.shutdown()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.05)
+
+    asyncio.run(go())
+    assert seen == []
+
+
+def test_a_listener_that_raises_does_not_silence_the_answer() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    sink = FakeAudioSink()
+
+    def _boom(_event):
+        raise RuntimeError("Zuhörer kaputt")
+
+    controller = VoicePlaybackController(provider, sink, on_audio_started=_boom)
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Trotzdem sprechen."))
+
+    result = asyncio.run(go())
+
+    assert result.error == ""
+    assert result.chunks > 0
+
+
+def test_no_listener_at_all_is_fine() -> None:
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    controller = VoicePlaybackController(provider, FakeAudioSink())
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Ohne Zuhörer."))
+
+    assert asyncio.run(go()).chunks > 0
+
+
+def test_cancelling_the_run_task_with_a_full_queue_terminates() -> None:
+    """Regression: _run cancelled the producer and awaited it *before* draining,
+    so the producer's own sentinel put blocked on a full queue and the await
+    never returned. Surfaced when the consumer gained one extra loop turn."""
+    provider = FakeTTSProvider(chunk_seconds=0.05)
+    gate = asyncio.Event()
+
+    class _Gated:
+        async def play(self, chunk):
+            await gate.wait()
+
+        async def stop(self) -> None: ...
+
+        async def close(self) -> None: ...
+
+    controller = VoicePlaybackController(provider, _Gated(), prefetch=1)
+
+    async def go():
+        await provider.load()
+        task = await controller.submit(TTSRequest(text="Ein langer Satz für viele Stücke."))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(go())

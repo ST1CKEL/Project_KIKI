@@ -297,30 +297,54 @@ einem Markdown-Link. Der erste Chunk wird früh geschnitten, weil die Stille vor
 dem ersten Ton praktisch seine Länge ist; spätere Chunks bleiben länger, damit
 die Betonung natürlich bleibt.
 
-### Offen: `on_audio_started` (nächster Voice-Slice)
+### Signale der Sprachausgabe: `on_speaking`, `on_audio_started`, `on_idle`
 
-`on_speaking` bedeutet auf den beiden Routen **nicht dasselbe**:
+Der `SpeechDirector` meldet drei Dinge, und sie bedeuten nicht dasselbe:
 
-| Route | Was `on_speaking` heißt |
+| Signal | Bedeutung |
 |---|---|
-| Dateiroute (Standard) | Das fertige WAV geht gerade an den Player — Ton läuft oder beginnt in Millisekunden. |
-| Controller-Route (opt-in) | Der Auftrag wurde angenommen und übergeben. Die Synthese hat noch nicht begonnen; hörbar ist nichts. |
+| `on_speaking` | Der Sprachauftrag wurde angenommen. **Nicht** „es ist etwas zu hören." |
+| `on_audio_started` | Der erste Chunk mit echten Samples geht an die Wiedergabe. Ab hier ist KIKI hörbar. |
+| `on_idle` | Die Äußerung ist beendet, abgebrochen oder fehlgeschlagen. |
 
-Die Character-State-Machine wechselt heute bei `on_speaking` von `thinking` auf
-`speaking`. Auf der Controller-Route animiert KIKI damit, während sie noch
-stumm synthetisiert — bei kaltem GPU-Dienst mehrere Sekunden lang.
+Die Character-State-Machine wechselt bei `on_audio_started` von `thinking` auf
+`speaking`. `on_speaking` stummschaltet nur das Mikrofon — früh ist dort
+harmlos, spät ließe KIKI sich selbst hören.
 
-Der nächste Slice führt dafür ein eigenes Signal ein, `on_audio_started`
-(alternativ `on_playback_started`): der Sink meldet den **ersten tatsächlich
-abgespielten Chunk** durch den Controller nach oben, und erst das schaltet die
-Animation um. `on_speaking` bleibt daneben bestehen und behält seine heutige
-Bedeutung „Auftrag angenommen".
+**Warum das nötig wurde.** Auf der Controller-Route liegen zwischen Annahme und
+erstem Ton mehrere Sekunden: der Dienst antwortet mit einem *vollständigen* WAV,
+also existiert vor dem Ende der Synthese kein einziges Sample. Gemessen gegen den
+laufenden Dienst: `time_to_first_audio` = 5,32 s bei 2,88 s Audio. Hätte die
+Animation weiter an `on_speaking` gehangen, hätte KIKI die halbe Zeit stumm
+geredet.
 
-Bewusst nicht in diesem Slice: das braucht einen Callback-Weg vom `AudioSink`
-durch den `VoicePlaybackController` und eine Änderung an der State-Machine —
-beides Dinge, die der Flag-Slice nicht anfassen durfte. Der Vertrag ist in
-`SpeechDirector` als `TODO(voice-slice-next)` markiert und in
-`tests/test_voice_route_flag.py` festgenagelt.
+**Beide Routen senden das Signal.** Auf der Dateiroute fällt es mit
+`on_speaking` zusammen — das WAV ist fertig, wenn es den Player erreicht, „an-
+genommen" und „hörbar" sind dort derselbe Augenblick. Dadurch braucht der
+Zuhörer keine Fallunterscheidung nach Route.
+
+**Wo genau es ausgelöst wird.** Im `VoicePlaybackController`, für den ersten
+Chunk mit Samples, der die Prüfungen besteht (richtige Request-ID, nicht
+abgebrochen, nicht verworfen). Der Aufruf an den Sink wird dafür zu einem Task
+und bekommt eine Loop-Runde: das reicht `PipeWireAudioSink`, um seine Datei zu
+schreiben und die Pipeline zu starten — beides passiert vor seinem ersten
+`await`. Scheitert er in dieser Strecke, wurde nie ein Ton erzeugt und nichts
+gemeldet. Vorher zu melden würde Audio behaupten, das ein defekter Sink nie
+erzeugt; nachher zu melden käme erst, wenn der Chunk schon vorbei ist.
+
+**Thread-Grenze.** Der Controller ruft auf dem asyncio-Thread zurück.
+`kiki.voice.tts` importiert kein GLib; die Anwendung reicht das Ereignis mit
+`GLib.idle_add` an den GTK-Main-Thread weiter — derselbe Weg, den Weckwort und
+Watcher schon nehmen. Der `SpeechDirector` verwirft dabei jedes Ereignis, dessen
+Request-ID nicht zur laufenden Äußerung gehört: eine Antwort, die der Nutzer
+unterbrochen hat, kann sich hinterher nicht mehr melden.
+
+**Was das Signal nicht ist.** Es markiert den Beginn der *lokalen Wiedergabe*,
+nicht den Beginn der Modell-Synthese. Solange der Dienstpfad ganze WAV-Dateien
+liefert, kann „Audio gestartet" erst nach dem Ende der Synthese eintreten. Echtes
+PCM-Streaming — der Dienst schickt Chunks, während er noch rechnet — bleibt ein
+eigener, späterer Optimierungsslice; erst der verkürzt den Abstand zwischen
+`on_speaking` und `on_audio_started`.
 
 ### Phase 2H — Eigener LLM-Harness
 

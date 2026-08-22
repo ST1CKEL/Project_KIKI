@@ -16,7 +16,12 @@ import pytest
 
 from kiki.config.settings import default_mapping, load_settings, settings_from_mapping
 from kiki.voice.director import SpeechDirector
-from kiki.voice.tts import TTSError, TTSGenerationResult, TTSRequest
+from kiki.voice.tts import (
+    AudioStartedEvent,
+    TTSError,
+    TTSGenerationResult,
+    TTSRequest,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -941,3 +946,270 @@ def test_the_flag_is_never_switched_on_again_by_a_failure(tmp_path: Path) -> Non
 
     assert director.uses_controller_route is False
     assert controller.requests == []
+
+
+# --- on_audio_started through the director ----------------------------------
+
+
+def _director_with_audio(tmp_path: Path, *, controller=None, flag=False,
+                         submit=_sync_submit, player=None):
+    """Records the signal order the UI would see."""
+    events: list[str] = []
+    player = player or _FakePlayer()
+    director = SpeechDirector(
+        synthesize=_synth_ok,
+        player=player,
+        submit=submit,
+        wav_dir=tmp_path,
+        on_speaking=lambda: events.append("speaking"),
+        on_audio_started=lambda: events.append("audio"),
+        on_idle=lambda: events.append("idle"),
+        on_error=lambda exc: events.append(f"error:{exc}"),
+        controller=controller,
+        use_controller_route=flag,
+    )
+    return director, player, events
+
+
+def _event(director: SpeechDirector, sequence: int = 0) -> AudioStartedEvent:
+    """The event the controller would send for the utterance in flight."""
+    return AudioStartedEvent(
+        request_id=director._route_request_id or "",
+        sequence=sequence,
+        timestamp_monotonic=time.monotonic(),
+    )
+
+
+def test_speaking_comes_before_audio_started_on_the_controller_route(tmp_path: Path) -> None:
+    controller = _FakeController(auto_finish=False)
+    submit = _DeferredSubmit()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=submit
+    )
+    director.say("Hallo Martin.")
+
+    assert events == ["speaking"]        # accepted, still silent
+    director.audio_started(_event(director))
+    assert events == ["speaking", "audio"]
+    submit.discard()
+
+
+def test_audio_started_arrives_before_idle(tmp_path: Path) -> None:
+    controller = _FakeController()
+    submit = _DeferredSubmit()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=submit
+    )
+    director.say("Hallo.")
+    director.audio_started(_event(director))
+    submit.run_all()
+
+    assert events == ["speaking", "audio", "idle"]
+
+
+def test_a_second_event_for_the_same_utterance_is_ignored(tmp_path: Path) -> None:
+    controller = _FakeController(auto_finish=False)
+    submit = _DeferredSubmit()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=submit
+    )
+    director.say("Hallo.")
+    event = _event(director)
+    director.audio_started(event)
+    director.audio_started(event)
+
+    assert events.count("audio") == 1
+    submit.discard()
+
+
+def test_an_event_for_a_foreign_request_is_ignored(tmp_path: Path) -> None:
+    controller = _FakeController(auto_finish=False)
+    submit = _DeferredSubmit()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=submit
+    )
+    director.say("Hallo.")
+    director.audio_started(
+        AudioStartedEvent(request_id="jemand-anderes", sequence=0, timestamp_monotonic=1.0)
+    )
+
+    assert "audio" not in events
+    submit.discard()
+
+
+def test_stop_between_speaking_and_audio_prevents_the_state_change(tmp_path: Path) -> None:
+    """The case the whole slice exists for: the user interrupts while KIKI is
+    still synthesising, so she must never start looking like she talks."""
+    controller = _FakeController(auto_finish=False)
+    submit = _DeferredSubmit()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=submit
+    )
+    director.say("Ein langer Satz.")
+    stale = _event(director)
+
+    director.stop()
+    director.audio_started(stale)
+
+    assert "audio" not in events
+    assert events == ["speaking", "idle"]
+    submit.run_all()
+    assert "audio" not in events
+
+
+def test_a_superseded_utterance_cannot_announce_over_the_next_one(tmp_path: Path) -> None:
+    controller = _FakeController(auto_finish=False)
+    submit = _DeferredSubmit()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=submit
+    )
+    director.say("Erster Satz.")
+    stale = _event(director)
+    director.say("Zweiter Satz.")
+
+    director.audio_started(stale)
+    assert "audio" not in events
+
+    director.audio_started(_event(director))
+    assert events.count("audio") == 1
+    submit.discard()
+
+
+def test_a_controller_failure_before_playback_announces_no_audio(tmp_path: Path) -> None:
+    controller = _FakeController(raises=TTSError("Unerwarteter TTS-Inhalt", code="format"))
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True
+    )
+    director.say("Hallo")
+
+    assert "audio" not in events
+    assert any(event.startswith("error") for event in events)
+
+
+def test_the_next_utterance_can_announce_again(tmp_path: Path) -> None:
+    controller = _FakeController()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=_DeferredSubmit()
+    )
+    director.say("Erster.")
+    director.audio_started(_event(director))
+    director.say("Zweiter.")
+    director.audio_started(_event(director))
+
+    assert events.count("audio") == 2
+
+
+def test_the_file_route_announces_audio_together_with_speaking(tmp_path: Path) -> None:
+    """Deliberate: on the file route the WAV is finished when it reaches the
+    player, so both signals belong to the same instant. A listener can key the
+    audible state on one signal for both routes."""
+    director, player, events = _director_with_audio(tmp_path, controller=None, flag=False)
+    director.say("Hallo")
+
+    assert events == ["speaking", "audio"]
+    assert len(player.played) == 1
+    player.finish()
+    assert events == ["speaking", "audio", "idle"]
+
+
+def test_a_director_without_the_new_callback_still_works(tmp_path: Path) -> None:
+    """Backwards compatible: on_audio_started is optional."""
+    controller = _FakeController()
+    director, _player = _director(tmp_path, controller=controller, flag=True)
+    director.say("Hallo.")
+    director.audio_started(_event(director))
+
+    assert director.active is False
+
+
+# --- the thread boundary ----------------------------------------------------
+
+
+def test_the_controller_event_reaches_gtk_only_through_idle_add(monkeypatch) -> None:
+    """The controller calls back on the asyncio thread. GTK may only be touched
+    on the main thread, so the event has to go through GLib.idle_add — the same
+    route the wake word and the watcher already take."""
+    from gi.repository import GLib
+
+    from kiki.application import KikiApplication
+
+    scheduled: list[tuple] = []
+    monkeypatch.setattr(
+        GLib, "idle_add", lambda callback, *args, **kwargs: scheduled.append((callback, args))
+    )
+
+    class _Stub:
+        _speech = None
+        _apply_audio_started = KikiApplication._apply_audio_started
+
+    stub = _Stub()
+    event = AudioStartedEvent(request_id="r", sequence=0, timestamp_monotonic=1.0)
+    KikiApplication._on_voice_audio_started(stub, event)
+
+    assert len(scheduled) == 1
+    callback, args = scheduled[0]
+    assert args == (event,)
+    # The handler itself only runs once GLib calls it back on the main thread.
+    assert callback.__func__ is KikiApplication._apply_audio_started
+
+
+def test_the_main_thread_handler_forwards_to_the_director(tmp_path: Path) -> None:
+    from kiki.application import KikiApplication
+
+    controller = _FakeController(auto_finish=False)
+    submit = _DeferredSubmit()
+    director, _player, events = _director_with_audio(
+        tmp_path, controller=controller, flag=True, submit=submit
+    )
+    director.say("Hallo.")
+
+    class _Stub:
+        pass
+
+    stub = _Stub()
+    stub._speech = director
+    assert KikiApplication._apply_audio_started(stub, _event(director)) is False
+    assert "audio" in events
+    submit.discard()
+
+
+def test_the_state_machine_only_speaks_on_audio(tmp_path: Path) -> None:
+    """`on_speaking` mutes the microphone; only `on_audio_started` moves the
+    character out of thinking."""
+    from kiki.application import KikiApplication
+    from kiki.character.state_machine import CharacterState, CharacterStateMachine
+
+    class _Stub:
+        def __init__(self) -> None:
+            self._machine = CharacterStateMachine()
+            self.paused = 0
+
+        def _pause_wake(self) -> None:
+            self.paused += 1
+
+    stub = _Stub()
+    stub._machine.set(CharacterState.THINKING, hold_ms=0)
+
+    KikiApplication._on_tts_speaking(stub)
+    assert stub.paused == 1
+    assert stub._machine.state is CharacterState.THINKING   # still not talking
+
+    KikiApplication._on_tts_audio_started(stub)
+    assert stub._machine.state is CharacterState.SPEAKING
+
+
+def test_a_paused_character_is_never_woken_by_audio() -> None:
+    from kiki.application import KikiApplication
+    from kiki.character.state_machine import CharacterState, CharacterStateMachine
+
+    class _Stub:
+        def __init__(self) -> None:
+            self._machine = CharacterStateMachine()
+
+    stub = _Stub()
+    stub._machine.pause()          # set() cannot reach PAUSED; pause() is the way
+    assert stub._machine.paused is True
+
+    KikiApplication._on_tts_audio_started(stub)
+
+    assert stub._machine.state is CharacterState.PAUSED

@@ -178,6 +178,7 @@ class KikiApplication(Adw.Application):
             submit=self._bridge.submit,
             wav_dir=wav_dir,
             on_speaking=self._on_tts_speaking,
+            on_audio_started=self._on_tts_audio_started,
             on_idle=self._on_tts_idle,
             on_error=self._on_tts_error,
             controller=self._build_voice_controller(),
@@ -217,11 +218,29 @@ class KikiApplication(Adw.Application):
                 provider.load(),
                 on_error=self._on_voice_route_unavailable,
             )
-            self._voice_controller = VoicePlaybackController(provider, PipeWireAudioSink())
+            self._voice_controller = VoicePlaybackController(
+                provider,
+                PipeWireAudioSink(),
+                on_audio_started=self._on_voice_audio_started,
+            )
             return self._voice_controller
         except Exception:
             log.exception("could not build the controller voice route — staying on the old one")
             return None
+
+    def _on_voice_audio_started(self, event: object) -> None:
+        """Runs on the asyncio thread — hand the event to GTK, touch nothing.
+
+        Same route as the wake word and the watcher use: GLib.idle_add. The
+        character state machine may only be moved on the main thread, and this
+        must not block the audio path while it happens.
+        """
+        GLib.idle_add(self._apply_audio_started, event)
+
+    def _apply_audio_started(self, event: object) -> bool:
+        if self._speech is not None:
+            self._speech.audio_started(event)
+        return False
 
     def _on_voice_route_unavailable(self, exc: BaseException) -> None:
         """The opt-in route could not be brought up. Go back to the old one.
@@ -887,8 +906,15 @@ class KikiApplication(Adw.Application):
         raise TtsError(detail)
 
     def _on_tts_speaking(self) -> None:
+        """The request was accepted. On the controller route KIKI is still
+        silent at this point, so only the microphone is dealt with here."""
         # KIKI's own voice must not wake her: the microphone hears the speakers.
+        # Muted on acceptance rather than on first audio — early is harmless,
+        # late would let her hear herself.
         self._pause_wake()
+
+    def _on_tts_audio_started(self) -> None:
+        """First audible chunk. Both routes emit it; only now does she speak."""
         if self._machine.state is CharacterState.PAUSED:
             return
         self._machine.set(CharacterState.SPEAKING, hold_ms=0)

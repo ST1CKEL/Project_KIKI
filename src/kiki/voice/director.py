@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from kiki.voice.tts.models import TTSError, TTSGenerationResult, TTSRequest
+from kiki.voice.tts.models import (
+    AudioStartedEvent,
+    TTSError,
+    TTSGenerationResult,
+    TTSRequest,
+)
 from kiki.voice.tts_client import TtsError
 from kiki.voice.tts_text import flush_buffer, speakable, split_ready
 
@@ -84,12 +89,15 @@ class SpeechDirector:
       has not started. Nothing audible exists yet, and on a cold GPU service the
       first sample can be seconds away.
 
-    TODO(voice-slice-next) — `on_audio_started` / `on_playback_started`:
-    the character state machine should leave `thinking` only when the sink
-    actually plays its first chunk, not when the request is accepted. That needs
-    a callback from the sink through the controller, which is deliberately out
-    of scope here. Until then `on_speaking` on the controller route must not be
-    read as "KIKI is audible" — see tests/test_voice_route_flag.py.
+    `on_audio_started` closes that gap: it fires once per utterance, when the
+    first chunk with actual samples is going to the speakers. Both routes emit
+    it, so a listener can key the "KIKI is audible" state on this one signal
+    without asking which route it is on:
+
+    * file route — at the same instant as `on_speaking`, since the WAV is
+      complete by then and playback starts with it;
+    * controller route — when the controller hands the first chunk to the sink,
+      which on the WAV-based service path is after synthesis finished.
     """
 
     def __init__(
@@ -100,6 +108,7 @@ class SpeechDirector:
         submit: SubmitFn,
         wav_dir: Path,
         on_speaking: Callable[[], None] | None = None,
+        on_audio_started: Callable[[], None] | None = None,
         on_idle: Callable[[], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         service_down: Callable[[BaseException], bool] | None = None,
@@ -111,6 +120,7 @@ class SpeechDirector:
         self._submit = submit
         self._wav_dir = wav_dir
         self._on_speaking = on_speaking
+        self._on_audio_started = on_audio_started
         self._on_idle = on_idle
         self._on_error = on_error
         self._service_down = service_down or service_is_down
@@ -136,6 +146,26 @@ class SpeechDirector:
         # text queue and nothing else — no WAV queue, no _synth_busy.
         self._route_busy = False
         self._route_handle: CancelHandle | None = None
+        # Which utterance the controller is on, and whether its audio was
+        # already announced. A late event for any other id is dropped.
+        self._route_request_id: str | None = None
+        self._route_announced = False
+
+    def audio_started(self, event: AudioStartedEvent) -> None:
+        """The controller reports that the first chunk is going to the speakers.
+
+        Arrives on the asyncio thread — the caller is responsible for marshalling
+        onwards to GTK. Kept cheap and lock-only for exactly that reason.
+
+        Events for a superseded or already finished utterance are dropped: after
+        `stop()` the id no longer matches, so an answer the user interrupted can
+        never announce itself afterwards.
+        """
+        with self._lock:
+            if self._route_request_id != event.request_id or self._route_announced:
+                return
+            self._route_announced = True
+        self._emit_audio_started()
 
     def disable_controller_route(self) -> None:
         """Fall back to the file route for good.
@@ -274,6 +304,8 @@ class SpeechDirector:
         ]
         self._synth_handle = None
         self._route_handle = None
+        self._route_request_id = None
+        self._route_announced = False
         self._active_synth_path = None
         self._active_play_path = None
         self._synth_busy = False
@@ -362,6 +394,10 @@ class SpeechDirector:
             # utterance so the queue keeps moving.
             self._on_route_done(generation, None)
             return
+        with self._lock:
+            if generation == self._generation:
+                self._route_request_id = request.id
+                self._route_announced = False
         # Announced before the hand-over, so the order the UI sees does not
         # depend on whether submit() happens to run the coroutine inline.
         if self._on_speaking is not None:
@@ -399,6 +435,7 @@ class SpeechDirector:
             self._warned_down = False
             self._route_handle = None
             self._route_busy = False
+            self._route_request_id = None
             # A superseded utterance must not pull the next sentence forward:
             # whatever should follow was already cleared by stop().
             jobs = NO_JOBS if cancelled else self._arm_locked()
@@ -414,6 +451,7 @@ class SpeechDirector:
                 return
             self._route_handle = None
             self._route_busy = False
+            self._route_request_id = None
             if down:
                 warn = not self._warned_down
                 self._warned_down = True
@@ -479,6 +517,11 @@ class SpeechDirector:
         )
         if self._on_speaking is not None:
             self._on_speaking()
+        # Deliberate: the file route emits both signals at once. The WAV is
+        # finished by the time it reaches the player, so "accepted" and "audible"
+        # really are the same instant here — and a listener can then key the
+        # audible state on one signal for both routes.
+        self._emit_audio_started()
 
     def _on_wav(self, generation: int, path: Path) -> None:
         with self._lock:
@@ -593,6 +636,10 @@ class SpeechDirector:
             return False
         self._active = False
         return True
+
+    def _emit_audio_started(self) -> None:
+        if self._on_audio_started is not None:
+            self._on_audio_started()
 
     def _emit_idle(self) -> None:
         if self._on_idle is not None:

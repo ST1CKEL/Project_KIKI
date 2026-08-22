@@ -22,9 +22,16 @@ import contextlib
 import logging
 import re
 import time
+from collections.abc import Callable
 from enum import StrEnum
 
-from kiki.voice.tts.models import AudioChunk, TTSError, TTSGenerationResult, TTSRequest
+from kiki.voice.tts.models import (
+    AudioChunk,
+    AudioStartedEvent,
+    TTSError,
+    TTSGenerationResult,
+    TTSRequest,
+)
 from kiki.voice.tts.playback import AudioSink
 from kiki.voice.tts.provider import TTSProvider
 
@@ -48,6 +55,7 @@ class VoicePlaybackController:
         sink: AudioSink,
         *,
         prefetch: int = DEFAULT_PREFETCH,
+        on_audio_started: Callable[[AudioStartedEvent], None] | None = None,
     ) -> None:
         if int(prefetch) < 1:
             # Not silently corrected: a caller asking for "no buffer" means
@@ -56,6 +64,9 @@ class VoicePlaybackController:
         self._provider = provider
         self._sink = sink
         self._prefetch = int(prefetch)
+        # Called on the asyncio thread. A GTK listener must marshal it itself;
+        # nothing in this package may touch GLib.
+        self._on_audio_started = on_audio_started
         self._state = PlaybackState.IDLE
         self._current: TTSRequest | None = None
         self._task: asyncio.Task[TTSGenerationResult] | None = None
@@ -164,6 +175,11 @@ class VoicePlaybackController:
         finally:
             if not producer.done():
                 producer.cancel()
+                # Drain *before* awaiting: the producer's own finally still puts
+                # its sentinel, and a full queue would make that put block
+                # forever. The consumer normally keeps draining, but here it was
+                # cancelled along with this task and cannot.
+                _drain(queue)
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await producer
             _drain(queue)
@@ -222,6 +238,7 @@ class VoicePlaybackController:
         `task.cancel()` arriving in time.
         """
         draining = False
+        announced = False
         while True:
             chunk = await queue.get()
             if chunk is None:
@@ -235,7 +252,11 @@ class VoicePlaybackController:
                 # A chunk from a superseded answer must never be heard.
                 continue
             try:
-                await self._sink.play(chunk)
+                if announced or not chunk.pcm:
+                    # An empty chunk makes no sound, so it may not claim to.
+                    await self._sink.play(chunk)
+                else:
+                    announced = await self._play_first(chunk)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -247,6 +268,53 @@ class VoicePlaybackController:
                 result.time_to_first_audio = time.perf_counter() - started
             result.chunks += 1
             result.audio_seconds += chunk.duration_s
+
+
+    async def _play_first(self, chunk: AudioChunk) -> bool:
+        """Play the opening chunk and report whether sound actually started.
+
+        The signal has to fire *while* the chunk plays: before `play()` would
+        announce audio a failing sink never produced, after it would announce it
+        once the chunk is already over. So the call becomes a task and gets one
+        loop turn — enough for `PipeWireAudioSink` to write its file and start
+        the pipeline, all of which happens before its first await. If it blew up
+        in that stretch, no sound was ever made and nothing is announced.
+
+        A sink that awaits something *before* starting audio would be announced
+        slightly early. None of KIKI's sinks does, and the alternative — a
+        callback inside the sink — would push this concern into every
+        implementation of the protocol.
+        """
+        task = asyncio.create_task(
+            self._sink.play(chunk), name=f"play-{chunk.request_id}-{chunk.sequence}"
+        )
+        try:
+            await asyncio.sleep(0)
+            failed = task.done() and not task.cancelled() and task.exception() is not None
+            if not failed:
+                self._announce(chunk)
+            await task
+            return not failed
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            raise
+
+    def _announce(self, chunk: AudioChunk) -> None:
+        if self._on_audio_started is None:
+            return
+        event = AudioStartedEvent(
+            request_id=chunk.request_id,
+            sequence=chunk.sequence,
+            timestamp_monotonic=time.monotonic(),
+        )
+        try:
+            self._on_audio_started(event)
+        except Exception:
+            # A listener that throws must not silence the rest of the answer.
+            log.warning("on_audio_started listener failed for %s", chunk.request_id)
 
 
 # Provider exceptions quote whatever they choked on. That text reaches

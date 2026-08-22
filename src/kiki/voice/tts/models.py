@@ -98,6 +98,20 @@ class AudioChunk:
         return len(self.pcm) / frame / max(1, self.sample_rate)
 
 
+@dataclass(frozen=True)
+class AudioStartedEvent:
+    """The first chunk of one request is on its way to the speakers.
+
+    Not "the request was accepted" and not "synthesis began" — on the WAV-based
+    service path those can be seconds earlier. Carries the request id so a
+    listener can drop an event from an answer that was already superseded.
+    """
+
+    request_id: str
+    sequence: int
+    timestamp_monotonic: float
+
+
 @dataclass
 class TTSGenerationResult:
     """What one completed (or aborted) generation cost."""
