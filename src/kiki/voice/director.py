@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from kiki.voice.tts.models import TTSError
+from kiki.voice.tts.models import TTSError, TTSGenerationResult, TTSRequest
 from kiki.voice.tts_client import TtsError
 from kiki.voice.tts_text import flush_buffer, speakable, split_ready
 
@@ -39,10 +39,21 @@ class PlayerLike(Protocol):
     def stop(self) -> None: ...
 
 
+class ControllerLike(Protocol):
+    """The slice of `VoicePlaybackController` the director drives."""
+
+    async def speak(self, request: TTSRequest) -> TTSGenerationResult: ...
+
+    async def interrupt(self) -> bool: ...
+
+
 SubmitFn = Callable[..., CancelHandle | None]
 SynthFn = Callable[[str, Path], Awaitable[Path]]
 SynthJob = tuple[str, int, Path]
 PlayJob = tuple[Path, int]
+RouteJob = tuple[str, int]
+Jobs = tuple[SynthJob | None, PlayJob | None, RouteJob | None]
+NO_JOBS: Jobs = (None, None, None)
 
 
 def service_is_down(exc: BaseException) -> bool:
@@ -55,7 +66,9 @@ def service_is_down(exc: BaseException) -> bool:
     nothing feeds into the director yet.
     """
     if isinstance(exc, TTSError):
-        return exc.code in {"unreachable", "timeout", "load"}
+        # not_ready belongs here too: a provider that never loaded fails every
+        # sentence, and warning once per answer beats warning once per clause.
+        return exc.code in {"unreachable", "timeout", "load", "not_ready"}
     return isinstance(exc, TtsError) and "nicht erreichbar" in str(exc)
 
 
@@ -73,6 +86,8 @@ class SpeechDirector:
         on_idle: Callable[[], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         service_down: Callable[[BaseException], bool] | None = None,
+        controller: ControllerLike | None = None,
+        use_controller_route: bool = False,
     ) -> None:
         self._synthesize = synthesize
         self._player = player
@@ -82,6 +97,10 @@ class SpeechDirector:
         self._on_idle = on_idle
         self._on_error = on_error
         self._service_down = service_down or service_is_down
+        self._controller = controller
+        # Both halves must be present. A flag without a controller would turn
+        # speech off rather than switching the route.
+        self._use_controller = bool(use_controller_route and controller is not None)
         self._lock = threading.Lock()
         self._generation = 0
         self._buffer = ""
@@ -96,11 +115,21 @@ class SpeechDirector:
         self._synth_handle: CancelHandle | None = None
         self._active_synth_path: Path | None = None
         self._active_play_path: Path | None = None
+        # The controller route keeps its own busy flag and handle. It shares the
+        # text queue and nothing else — no WAV queue, no _synth_busy.
+        self._route_busy = False
+        self._route_handle: CancelHandle | None = None
 
     @property
     def active(self) -> bool:
         with self._lock:
-            return self._active or self._playing or self._synth_busy or bool(self._play_queue)
+            return (
+                self._active
+                or self._playing
+                or self._synth_busy
+                or self._route_busy
+                or bool(self._play_queue)
+            )
 
     def begin(self) -> None:
         self.stop()
@@ -126,10 +155,8 @@ class SpeechDirector:
                 self._spoke_anything = True
             for chunk in chunks:
                 self._synth_queue.append(chunk)
-            synth = self._arm_synth_locked()
-            play = self._take_play_locked()
-        self._dispatch_synth(synth)
-        self._start_play(play)
+            jobs = self._arm_locked()
+        self._dispatch(jobs)
 
     def say(self, text: str) -> None:
         """Speak a complete utterance (prefs test, greet)."""
@@ -141,10 +168,8 @@ class SpeechDirector:
             self._stream_open = False
             self._active = True
             self._synth_queue.append(spoken)
-            synth = self._arm_synth_locked()
-            play = self._take_play_locked()
-        self._dispatch_synth(synth)
-        self._start_play(play)
+            jobs = self._arm_locked()
+        self._dispatch(jobs)
 
     def flush(self) -> None:
         with self._lock:
@@ -153,29 +178,43 @@ class SpeechDirector:
             self._stream_open = False
             if leftover:
                 self._synth_queue.append(leftover)
-            synth = self._arm_synth_locked()
-            play = self._take_play_locked()
+            jobs = self._arm_locked()
             idle = self._maybe_idle_locked()
-        self._dispatch_synth(synth)
-        self._start_play(play)
+        self._dispatch(jobs)
         if idle:
             self._emit_idle()
 
     def stop(self) -> None:
+        """Barge-in. Synchronous for the caller, in two guaranteed halves.
+
+        Synchronously, before this returns: the generation is bumped and both
+        queues are cleared, so every callback still in flight is stale and no
+        further sentence can start. That is the part the GTK thread depends on.
+
+        Asynchronously, on the bridge: the running provider and sink work is
+        cancelled. Actual silence needs the asyncio thread, so it cannot be
+        promised here — but nothing new is ever started after this returns.
+        """
         with self._lock:
             was_active = (
                 self._active
                 or self._playing
                 or self._synth_busy
+                or self._route_busy
                 or bool(self._synth_queue)
                 or bool(self._play_queue)
             )
-            handle, stale_paths = self._reset_locked()
-        if handle is not None:
+            handles, stale_paths = self._reset_locked()
+        for handle in handles:
             try:
                 handle.cancel()
             except Exception:
                 log.debug("synth cancellation failed", exc_info=True)
+        if was_active:
+            # begin() and say() both call stop() first. Handing the bridge an
+            # interrupt for an idle controller would cost a round-trip per
+            # answer and buy nothing.
+            self._cancel_route()
         try:
             self._player.stop()
         except Exception:
@@ -185,7 +224,7 @@ class SpeechDirector:
         if was_active:
             self._emit_idle()
 
-    def _reset_locked(self) -> tuple[CancelHandle | None, list[Path]]:
+    def _reset_locked(self) -> tuple[list[CancelHandle], list[Path]]:
         self._generation += 1
         self._buffer = ""
         self._spoke_anything = False
@@ -197,14 +236,20 @@ class SpeechDirector:
             stale_paths.append(self._active_synth_path)
         if self._active_play_path is not None:
             stale_paths.append(self._active_play_path)
-        handle = self._synth_handle
+        handles = [
+            handle
+            for handle in (self._synth_handle, self._route_handle)
+            if handle is not None
+        ]
         self._synth_handle = None
+        self._route_handle = None
         self._active_synth_path = None
         self._active_play_path = None
         self._synth_busy = False
+        self._route_busy = False
         self._playing = False
         self._active = False
-        return handle, list(dict.fromkeys(stale_paths))
+        return handles, list(dict.fromkeys(stale_paths))
 
     def _arm_synth_locked(self) -> SynthJob | None:
         if self._synth_busy or not self._synth_queue:
@@ -245,6 +290,144 @@ class SpeechDirector:
             # stop() may win the race before submit() returns its handle.
             handle.cancel()
             _unlink(dest)
+
+    def _arm_locked(self) -> Jobs:
+        """Pick the next piece of work for whichever route is active.
+
+        Exactly one of the two routes is ever armed, so the controller path can
+        never end up feeding the WAV queue or vice versa.
+        """
+        if self._use_controller:
+            return None, None, self._arm_route_locked()
+        return self._arm_synth_locked(), self._take_play_locked(), None
+
+    def _dispatch(self, jobs: Jobs) -> None:
+        synth, play, route = jobs
+        self._dispatch_synth(synth)
+        self._start_play(play)
+        self._dispatch_route(route)
+
+    def _arm_route_locked(self) -> RouteJob | None:
+        """One sentence at a time.
+
+        `VoicePlaybackController.submit()` supersedes whatever is running, so
+        handing it the next sentence early would cut the current one off
+        mid-word. The queue that keeps order is the text queue, not a second
+        audio queue.
+        """
+        if self._route_busy or not self._synth_queue:
+            return None
+        self._route_busy = True
+        return self._synth_queue.popleft(), self._generation
+
+    def _dispatch_route(self, job: RouteJob | None) -> None:
+        if job is None:
+            return
+        text, generation = job
+        try:
+            request = TTSRequest(text=text)
+        except ValueError:
+            # Nothing speakable survived the chunker. Treat it as a finished
+            # utterance so the queue keeps moving.
+            self._on_route_done(generation, None)
+            return
+        # Announced before the hand-over, so the order the UI sees does not
+        # depend on whether submit() happens to run the coroutine inline.
+        if self._on_speaking is not None:
+            self._on_speaking()
+        coro = self._controller.speak(request)  # type: ignore[union-attr]
+        try:
+            handle = self._submit(
+                coro,
+                on_success=lambda result: self._on_route_done(generation, result),
+                on_error=lambda exc: self._on_route_failed(generation, exc),
+            )
+        except Exception as exc:
+            coro.close()
+            self._on_route_failed(generation, exc)
+            return
+        if handle is None:
+            return
+        with self._lock:
+            stale = generation != self._generation
+            if not stale and self._route_busy:
+                self._route_handle = handle
+        if stale:
+            # stop() may win the race before submit() returns its handle.
+            handle.cancel()
+
+    def _on_route_done(self, generation: int, result: TTSGenerationResult | None) -> None:
+        error = getattr(result, "error", "") or ""
+        if error:
+            self._on_route_failed(generation, TTSError(error, code="route"))
+            return
+        cancelled = bool(getattr(result, "cancelled", False))
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._warned_down = False
+            self._route_handle = None
+            self._route_busy = False
+            # A superseded utterance must not pull the next sentence forward:
+            # whatever should follow was already cleared by stop().
+            jobs = NO_JOBS if cancelled else self._arm_locked()
+            idle = self._maybe_idle_locked()
+        self._dispatch(jobs)
+        if idle:
+            self._emit_idle()
+
+    def _on_route_failed(self, generation: int, exc: BaseException) -> None:
+        down = self._service_down(exc)
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._route_handle = None
+            self._route_busy = False
+            if down:
+                warn = not self._warned_down
+                self._warned_down = True
+                handles, stale_paths = self._reset_locked()
+                jobs = NO_JOBS
+                idle = True
+            else:
+                warn = True
+                handles, stale_paths = [], []
+                log.warning("tts sentence skipped: %s", exc)
+                jobs = self._arm_locked()
+                idle = self._maybe_idle_locked()
+        for handle in handles:
+            try:
+                handle.cancel()
+            except Exception:
+                log.debug("route cancellation failed", exc_info=True)
+        for path in stale_paths:
+            _unlink(path)
+        if down:
+            self._cancel_route()
+        self._dispatch(jobs)
+        if warn and self._on_error is not None:
+            self._on_error(exc)
+        if idle:
+            self._emit_idle()
+
+    def _cancel_route(self) -> None:
+        """Hand the actual silencing to the bridge and return at once.
+
+        The GTK thread must never wait for the sink, so this only queues the
+        interrupt. Nothing new can start regardless: stop() already bumped the
+        generation before calling this.
+        """
+        if not self._use_controller or self._controller is None:
+            return
+        coro = self._controller.interrupt()
+        try:
+            self._submit(
+                coro,
+                on_error=lambda exc: log.debug("voice interrupt failed: %s", exc),
+            )
+        except Exception:
+            coro.close()
+            log.debug("could not hand the interrupt to the bridge", exc_info=True)
 
     def _take_play_locked(self) -> PlayJob | None:
         if self._playing or not self._play_queue:
@@ -292,7 +475,7 @@ class SpeechDirector:
         with self._lock:
             if generation != self._generation:
                 stale = True
-                handle = None
+                handles: list[CancelHandle] = []
                 stale_paths: list[Path] = []
                 synth = None
                 play = None
@@ -306,12 +489,12 @@ class SpeechDirector:
                 if down:
                     warn = not self._warned_down
                     self._warned_down = True
-                    handle, stale_paths = self._reset_locked()
+                    handles, stale_paths = self._reset_locked()
                     synth = None
                     play = None
                     idle = True
                 else:
-                    handle = None
+                    handles = []
                     stale_paths = []
                     log.warning("tts sentence skipped: %s", exc)
                     synth = self._arm_synth_locked()
@@ -321,7 +504,7 @@ class SpeechDirector:
         _unlink(path)
         if stale:
             return
-        if handle is not None:
+        for handle in handles:
             try:
                 handle.cancel()
             except Exception:
@@ -371,7 +554,7 @@ class SpeechDirector:
             self._emit_idle()
 
     def _maybe_idle_locked(self) -> bool:
-        if self._stream_open or self._synth_busy or self._playing:
+        if self._stream_open or self._synth_busy or self._playing or self._route_busy:
             return False
         if self._synth_queue or self._play_queue:
             return False
