@@ -5,6 +5,11 @@ the UI imports it, and nothing here may occupy a GPU as a side effect.
 """
 
 from kiki.voice.tts.chunker import ChunkerConfig, StreamingChunker, boundaries, is_speakable
+from kiki.voice.tts.controller import (
+    DEFAULT_PREFETCH,
+    PlaybackState,
+    VoicePlaybackController,
+)
 from kiki.voice.tts.fake import FakeTTSProvider, NullTTSProvider
 from kiki.voice.tts.models import (
     DEFAULT_AUDIO_FORMAT,
@@ -18,6 +23,7 @@ from kiki.voice.tts.models import (
     TTSProviderStatus,
     TTSRequest,
 )
+from kiki.voice.tts.playback import AudioSink, FakeAudioSink
 from kiki.voice.tts.policy import (
     SpeechPlan,
     VoiceMode,
@@ -29,11 +35,15 @@ from kiki.voice.tts.provider import TTSProvider
 __all__ = [
     "DEFAULT_AUDIO_FORMAT",
     "DEFAULT_CHANNELS",
+    "DEFAULT_PREFETCH",
     "DEFAULT_SAMPLE_RATE",
     "AudioChunk",
+    "AudioSink",
     "ChunkerConfig",
+    "FakeAudioSink",
     "FakeTTSProvider",
     "NullTTSProvider",
+    "PlaybackState",
     "SpeechPlan",
     "StreamingChunker",
     "TTSError",
@@ -44,6 +54,7 @@ __all__ = [
     "TTSProviderStatus",
     "TTSRequest",
     "VoiceMode",
+    "VoicePlaybackController",
     "VoicePolicyConfig",
     "VoiceResponsePolicy",
     "boundaries",
