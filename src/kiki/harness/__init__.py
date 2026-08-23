@@ -10,6 +10,12 @@ Nothing here imports GTK, torch, CUDA, a model runtime or the network. The model
 is behind a protocol with fakes only; the real binding comes in a later slice.
 """
 
+from kiki.harness.confirmation import (
+    ConfirmationError,
+    ConfirmationRequest,
+    PendingConfirmation,
+    fingerprint,
+)
 from kiki.harness.models import (
     ERROR_CODES,
     ActionKind,
@@ -21,13 +27,24 @@ from kiki.harness.models import (
     ToolResult,
     validate_action,
 )
+from kiki.harness.notes import CreateNoteTool, NotesWorkspace, slugify
 from kiki.harness.runner import AgentRunner, RunBusyError
+from kiki.harness.session import HarnessSession, SessionCallbacks
 from kiki.harness.system_status import SystemStatusTool
 from kiki.harness.tools import Tool, ToolRegistry
 from kiki.harness.trace import TraceRecorder, TraceWriteError
 
 __all__ = [
     "ERROR_CODES",
+    "ConfirmationError",
+    "ConfirmationRequest",
+    "CreateNoteTool",
+    "HarnessSession",
+    "NotesWorkspace",
+    "PendingConfirmation",
+    "SessionCallbacks",
+    "fingerprint",
+    "slugify",
     "ActionKind",
     "AgentRun",
     "AgentRunner",

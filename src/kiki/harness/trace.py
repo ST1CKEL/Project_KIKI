@@ -27,6 +27,13 @@ EVENTS: frozenset[str] = frozenset(
         "run_cancelled",
         "run_failed",
         "run_finished",
+        # Slice 2: enough to prove proposal → this exact approval → one write.
+        "confirmation_requested",
+        "confirmation_approved",
+        "confirmation_rejected",
+        "write_executed",
+        "ui_delivery_completed",
+        "voice_delivery_completed",
     }
 )
 

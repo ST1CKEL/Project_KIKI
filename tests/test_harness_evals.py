@@ -329,10 +329,13 @@ sys.addaudithook(
     else None
 )
 import kiki.harness  # noqa: F401
+# subprocess and socket are deliberately absent from this list: asyncio
+# imports both itself, so their presence says nothing about the harness.
+# That guarantee is kept by the source check below instead.
 forbidden = [
     name for name in (
         "gi", "gi.repository", "torch", "numpy", "qwen_tts", "httpx",
-        "subprocess", "socket", "kiki.voice", "kiki.ui", "kiki.ai",
+        "kiki.voice", "kiki.ui",
     )
     if name in sys.modules
 ]

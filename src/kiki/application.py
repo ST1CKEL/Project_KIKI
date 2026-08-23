@@ -19,7 +19,7 @@ from kiki.integrations.datetime import DateTimeIntegration
 from kiki.integrations.disk import DiskIntegration
 from kiki.integrations.networkmanager import NetworkManagerIntegration
 from kiki.integrations.upower import UPowerIntegration
-from kiki.paths import cache_dir, database_path, icon_search_path
+from kiki.paths import cache_dir, database_path, icon_search_path, state_dir, user_data_dir
 from kiki.platform.autostart import set_enabled as set_autostart
 from kiki.platform.capabilities import detect_capabilities
 from kiki.runners.local import LocalWorkspaceRunner
@@ -86,6 +86,8 @@ class KikiApplication(Adw.Application):
         self._db: Database | None = None
         # Only built when tts.use_controller_route is on; needs closing at exit.
         self._voice_controller: object | None = None
+        # Built on first use; None means the harness is simply not available.
+        self._harness: object | None = None
         self._pet: PetWindow | None = None
         self._chat: ChatWindow | None = None
         self._prefs: PreferencesWindow | None = None
@@ -193,6 +195,144 @@ class KikiApplication(Adw.Application):
         self._subscribe_ui_event("chat.stream.error", self._on_stream_error)
         if self._settings.app.autostart:
             set_autostart(True)
+
+    # --- agent harness ------------------------------------------------------
+
+    def _build_harness(self):
+        """The agent harness, or nothing. Never fatal at startup.
+
+        Built lazily and defensively: a missing provider, an unwritable notes
+        directory or any import problem leaves KIKI exactly as she was, without
+        the harness.
+        """
+        try:
+            from kiki.ai.factory import active_model, create_provider
+            from kiki.harness.adapter import ProviderModelAdapter
+            from kiki.harness.notes import CreateNoteTool, NotesWorkspace
+            from kiki.harness.runner import AgentRunner
+            from kiki.harness.session import HarnessSession, SessionCallbacks
+            from kiki.harness.system_status import SystemStatusTool
+            from kiki.harness.tools import ToolRegistry
+
+            provider = create_provider(self._settings, self._secrets)
+            if not hasattr(provider, "stream_chat_tools"):
+                log.info("harness disabled: the provider cannot call tools")
+                return None
+            registry = ToolRegistry()
+            registry.register(SystemStatusTool())
+            registry.register(CreateNoteTool(NotesWorkspace(user_data_dir() / "notes")))
+            adapter = ProviderModelAdapter(
+                provider,
+                model=active_model(self._settings),
+                system_prompt=self._settings.compose_prompt(),
+            )
+            runner = AgentRunner(
+                adapter,
+                registry,
+                trace_dir=state_dir() / "harness",
+                on_confirmation_required=self._on_harness_confirmation,
+            )
+            session = HarnessSession(
+                runner,
+                SessionCallbacks(
+                    on_status=self._on_harness_status,
+                    on_answer=self._on_harness_answer,
+                    on_confirmation=None,   # routed through the runner callback
+                    on_speak=self._on_harness_speak,
+                ),
+            )
+            self._harness = session
+            return session
+        except Exception:
+            log.warning("agent harness unavailable", exc_info=False)
+            return None
+
+    def ask_harness(self, user_text: str) -> bool:
+        """Start one agent run from the UI. Returns False when it cannot."""
+        text = (user_text or "").strip()
+        if not text:
+            return False
+        session = self._harness or self._build_harness()
+        if session is None:
+            self._toast("Der Agent steht gerade nicht bereit.")
+            return False
+        if session.busy:
+            self._toast("KIKI arbeitet noch an der letzten Aufgabe.")
+            return False
+        try:
+            self._bridge.submit(
+                session.ask(text),
+                on_error=lambda exc: self._on_harness_status(
+                    "KIKI konnte das nicht ausführen"
+                ),
+            )
+        except Exception:
+            log.debug("could not hand the harness run to the bridge", exc_info=True)
+            return False
+        return True
+
+    # Every callback below arrives on the asyncio thread and hops to GTK, the
+    # same way the wake word and the watcher already report.
+
+    def _on_harness_status(self, text: str) -> None:
+        GLib.idle_add(self._apply_harness_status, text)
+
+    def _apply_harness_status(self, text: str) -> bool:
+        self._toast(text)
+        return False
+
+    def _on_harness_answer(self, text: str) -> None:
+        GLib.idle_add(self._apply_harness_answer, text)
+
+    def _apply_harness_answer(self, text: str) -> bool:
+        if self._chat is not None:
+            self._bus.publish("chat.assistant.text", text=text)
+        else:
+            self.notify_status("KIKI", text)
+        return False
+
+    def _on_harness_speak(self, text: str) -> None:
+        GLib.idle_add(self._apply_harness_speak, text)
+
+    def _apply_harness_speak(self, text: str) -> bool:
+        if self._settings.tts_allowed() and self._speech is not None:
+            self._speech.say(text)
+        return False
+
+    def _on_harness_confirmation(self, request) -> None:
+        GLib.idle_add(self._apply_harness_confirmation, request)
+
+    def _apply_harness_confirmation(self, request) -> bool:
+        """Show the proposal on the GTK thread and bind the answer to it."""
+        session = self._harness
+        if session is None:
+            return False
+        session.announce_confirmation(request)
+        preview = ActionPreview(
+            tool=request.tool_name,
+            title="Notiz anlegen",
+            params={"Datei": request.target, "Inhalt": request.content},
+            target=request.target,
+            effect="Legt eine neue Notiz im KIKI-Notizbereich an.",
+            risk=RiskLevel.WRITE,
+            reason="KIKI hat diese Notiz vorgeschlagen.",
+        )
+
+        def _settle(approved: bool) -> None:
+            # The exact run, call and fingerprint that were on screen.
+            if approved:
+                session.confirm(request.run_id, request.call_id, request.fingerprint)
+            else:
+                session.reject(request.run_id, request.call_id)
+
+        present_confirmation(self._chat or self._pet, preview, _settle)
+        return False
+
+    def _close_harness(self) -> None:
+        """Shutdown: nothing pending may still be written."""
+        session, self._harness = self._harness, None
+        if session is not None:
+            session.shutdown()
 
     def _build_voice_controller(self):
         """The opt-in route, built only when the flag asks for it.
@@ -953,6 +1093,7 @@ class KikiApplication(Adw.Application):
         self._toast(message)
 
     def _on_shutdown(self, *_args: object) -> None:
+        self._close_harness()
         self.stop_speech()
         self._close_voice_controller()
         # Release the microphone and the poll loop before the bridge goes away.

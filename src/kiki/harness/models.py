@@ -27,6 +27,14 @@ ERROR_CODES: frozenset[str] = frozenset(
         "tool_call_limit",
         "trace_write_failed",
         "run_busy",
+        # Slice 2: the write tool and the binding in front of it.
+        "note_exists",
+        "confirmation_rejected",
+        "confirmation_mismatch",
+        "confirmation_already_used",
+        "no_pending_confirmation",
+        "confirmation_abandoned",
+        "provider_error",
     }
 )
 
@@ -34,6 +42,9 @@ ERROR_CODES: frozenset[str] = frozenset(
 class RunStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
+    # Waiting for a human. Explicitly *not* terminal: the run continues or ends,
+    # but it never sits here after the process is gone.
+    NEEDS_CONFIRMATION = "needs_confirmation"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     FAILED = "failed"
@@ -178,6 +189,17 @@ class AgentRun:
     def start(self) -> None:
         if self.status is not RunStatus.PENDING:
             raise RuntimeError("ein Run startet genau einmal")
+        self.status = RunStatus.RUNNING
+
+    def await_confirmation(self) -> None:
+        """Pause for a human. Only from RUNNING, and never out of a terminal."""
+        if self.status is not RunStatus.RUNNING:
+            raise RuntimeError("nur ein laufender Run kann auf Bestätigung warten")
+        self.status = RunStatus.NEEDS_CONFIRMATION
+
+    def resume(self) -> None:
+        if self.status is not RunStatus.NEEDS_CONFIRMATION:
+            raise RuntimeError("nur ein wartender Run wird fortgesetzt")
         self.status = RunStatus.RUNNING
 
     def finish(
