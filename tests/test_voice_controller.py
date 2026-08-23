@@ -991,3 +991,419 @@ def test_cancelling_the_run_task_with_a_full_queue_terminates() -> None:
             await asyncio.wait_for(task, timeout=2)
 
     asyncio.run(go())
+
+
+# --- the streaming prebuffer -------------------------------------------------
+#
+# Off unless asked for. It is not derived from `capabilities().streaming`:
+# FakeTTSProvider reports that too, and rightly so — it does yield chunks
+# progressively. What the gate is about is a different property of the *route*:
+# live PCM whose producer is slower than realtime. Keying on capabilities would
+# have changed when playback starts for every test above.
+
+
+class _ScriptedProvider:
+    """Yields exactly the chunks it was given, on demand."""
+
+    provider_id = "scripted"
+
+    def __init__(self, chunks, *, fail_after=None, gate=None, hold_after=None, hold=None):
+        self._chunks = list(chunks)
+        self._fail_after = fail_after
+        self._gate = gate
+        # Stop producing after N chunks until released: lets a test look at the
+        # sink at a moment it fully controls, instead of racing the loop.
+        self._hold_after = hold_after
+        self._hold = hold
+        self._status = TTSProviderStatus.READY
+        self.cancelled: list[str] = []
+
+    @property
+    def status(self):
+        return self._status
+
+    def capabilities(self):
+        return FakeTTSProvider().capabilities()
+
+    async def health_check(self): ...
+
+    async def load(self) -> None: ...
+
+    async def unload(self) -> None: ...
+
+    async def cancel(self, request_id: str) -> None:
+        self.cancelled.append(request_id)
+
+    async def synthesize(self, request):
+        for index, chunk in enumerate(self._chunks):
+            if self._fail_after is not None and index == self._fail_after:
+                raise TTSError("Provider kaputt", code="service")
+            if self._hold is not None and index == self._hold_after:
+                await self._hold.wait()
+            if self._gate is not None:
+                await self._gate.wait()
+            yield AudioChunk(
+                request_id=request.id,
+                sequence=chunk.sequence,
+                pcm=chunk.pcm,
+                sample_rate=chunk.sample_rate,
+                channels=chunk.channels,
+                audio_format=chunk.audio_format,
+                final=chunk.final,
+            )
+
+
+class _RecordingSink:
+    """Records every play() and whether it was ever asked to stop."""
+
+    def __init__(self):
+        self.played: list[AudioChunk] = []
+        self.stops = 0
+        self.closed = False
+
+    async def play(self, chunk):
+        self.played.append(chunk)
+
+    async def stop(self) -> None:
+        self.stops += 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+    @property
+    def sequences(self):
+        return [chunk.sequence for chunk in self.played]
+
+
+def _pcm_chunk(sequence, *, frames=9600, final=False, **overrides):
+    values = {
+        "request_id": "r",
+        "sequence": sequence,
+        "pcm": b"\x11\x22" * frames,
+        "sample_rate": 24_000,
+        "channels": 1,
+        "audio_format": "pcm_s16le",
+        "final": final,
+    }
+    values.update(overrides)
+    return AudioChunk(**values)
+
+
+def _run_stream(chunks, *, prebuffer=2, sink=None, provider=None, **kwargs):
+    provider = provider or _ScriptedProvider(chunks)
+    sink = sink or _RecordingSink()
+    started: list[str] = []
+    controller = VoicePlaybackController(
+        provider, sink, prebuffer_chunks=prebuffer,
+        on_audio_started=lambda event: started.append(event.request_id), **kwargs
+    )
+
+    async def go():
+        return await controller.speak(TTSRequest(text="Hallo Martin.", id="req-1"))
+
+    result = asyncio.run(go())
+    return result, sink, started
+
+
+def test_the_prebuffer_is_off_unless_asked_for() -> None:
+    assert VoicePlaybackController(FakeTTSProvider(), FakeAudioSink()).prebuffer_chunks == 0
+
+
+def test_a_prebuffer_beyond_the_cap_is_refused() -> None:
+    for bad in (-1, 3, 10):
+        with pytest.raises(ValueError):
+            VoicePlaybackController(FakeTTSProvider(), FakeAudioSink(), prebuffer_chunks=bad)
+
+
+def test_nothing_is_played_before_the_second_chunk_arrives() -> None:
+    """The point of the gate: at RTF above one, starting on chunk one means the
+    buffer is empty from the first moment.
+
+    The provider stops after one chunk until released, so the sink is inspected
+    at a moment the test controls rather than whenever the loop got there.
+    """
+    hold = asyncio.Event()
+    provider = _ScriptedProvider(
+        [_pcm_chunk(0), _pcm_chunk(1, final=True)], hold_after=1, hold=hold
+    )
+    sink = _RecordingSink()
+    controller = VoicePlaybackController(provider, sink, prebuffer_chunks=2)
+
+    async def go():
+        task = await controller.submit(TTSRequest(text="Hallo.", id="req-1"))
+        for _ in range(30):
+            await asyncio.sleep(0)
+        after_one = list(sink.sequences)
+        hold.set()
+        await task
+        return after_one
+
+    after_one = asyncio.run(go())
+    assert after_one == [], "der erste Chunk darf noch nicht laufen"
+    assert sink.sequences == [0, 1]
+
+
+def test_both_held_chunks_play_in_order_once_the_gate_opens() -> None:
+    _result, sink, _started = _run_stream(
+        [_pcm_chunk(0), _pcm_chunk(1), _pcm_chunk(2, final=True)]
+    )
+    assert sink.sequences == [0, 1, 2]
+
+
+def test_a_single_final_chunk_starts_without_waiting() -> None:
+    """A short utterance must not wait for a second chunk that never comes."""
+    _result, sink, started = _run_stream([_pcm_chunk(0, frames=1200, final=True)])
+    assert sink.sequences == [0]
+    assert started == ["req-1"]
+
+
+def test_a_provider_that_ends_early_flushes_what_it_held() -> None:
+    """No `final` flag at all, and the stream simply stops: the held chunk is
+    still real audio and must be played."""
+    _result, sink, _started = _run_stream([_pcm_chunk(0, frames=1200)])
+    assert sink.sequences == [0]
+
+
+def test_the_byte_cap_opens_the_gate_before_the_chunk_count() -> None:
+    """A provider with longer chunks must not make the buffer bigger."""
+    big = _pcm_chunk(0, frames=19_200)          # 38400 bytes on its own
+    _result, sink, _started = _run_stream([big, _pcm_chunk(1, final=True)])
+    assert sink.sequences == [0, 1]
+
+
+def test_never_more_than_the_cap_is_held() -> None:
+    held: list[int] = []
+
+    class _Watching(_RecordingSink):
+        async def play(self, chunk):
+            held.append(len(self.played))
+            await super().play(chunk)
+
+    sink = _Watching()
+    chunks = [_pcm_chunk(index) for index in range(6)]
+    chunks[-1] = _pcm_chunk(5, final=True)
+    _run_stream(chunks, sink=sink)
+
+    # The first flush released exactly the two that were held.
+    assert held[0] == 0
+    assert held[1] == 1
+    assert sink.sequences == list(range(6))
+
+
+def test_sequences_and_final_survive_the_buffer_untouched() -> None:
+    chunks = [_pcm_chunk(0), _pcm_chunk(1), _pcm_chunk(2, final=True)]
+    _result, sink, _started = _run_stream(chunks)
+
+    assert [chunk.sequence for chunk in sink.played] == [0, 1, 2]
+    assert [chunk.final for chunk in sink.played] == [False, False, True]
+    assert [chunk.pcm for chunk in sink.played] == [chunk.pcm for chunk in chunks]
+
+
+def test_the_buffer_never_merges_chunks() -> None:
+    _result, sink, _started = _run_stream(
+        [_pcm_chunk(0, frames=1200), _pcm_chunk(1, frames=2400, final=True)]
+    )
+    assert [len(chunk.pcm) for chunk in sink.played] == [2400, 4800]
+
+
+# --- the audio-started event across the gate --------------------------------
+
+
+def test_no_event_while_the_buffer_fills() -> None:
+    hold = asyncio.Event()
+    provider = _ScriptedProvider(
+        [_pcm_chunk(0), _pcm_chunk(1, final=True)], hold_after=1, hold=hold
+    )
+    sink = _RecordingSink()
+    started: list[str] = []
+    controller = VoicePlaybackController(
+        provider, sink, prebuffer_chunks=2,
+        on_audio_started=lambda event: started.append(event.request_id),
+    )
+
+    async def go():
+        task = await controller.submit(TTSRequest(text="Hallo.", id="req-1"))
+        for _ in range(30):
+            await asyncio.sleep(0)
+        during = list(started)
+        hold.set()
+        await task
+        return during
+
+    during = asyncio.run(go())
+    assert during == [], "kein Ereignis, solange nur gesammelt wird"
+    assert started == ["req-1"]
+
+
+def test_the_event_fires_once_when_the_buffer_drains() -> None:
+    _result, _sink, started = _run_stream(
+        [_pcm_chunk(0), _pcm_chunk(1), _pcm_chunk(2, final=True)]
+    )
+    assert started == ["req-1"]
+
+
+# --- cancel and failure around the gate -------------------------------------
+
+
+def test_a_cancel_before_the_gate_plays_nothing() -> None:
+    gate = asyncio.Event()
+    provider = _ScriptedProvider(
+        [_pcm_chunk(0), _pcm_chunk(1, final=True)], hold_after=1, hold=gate
+    )
+    sink = _RecordingSink()
+    started: list[str] = []
+    controller = VoicePlaybackController(
+        provider, sink, prebuffer_chunks=2,
+        on_audio_started=lambda event: started.append(event.request_id),
+    )
+
+    async def go():
+        task = await controller.submit(TTSRequest(text="Hallo.", id="req-cancel"))
+        for _ in range(30):
+            await asyncio.sleep(0)
+        await controller.cancel("req-cancel")
+        gate.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+
+    assert sink.played == []
+    assert started == []
+    # stop() on a sink that never started a process is a documented no-op; what
+    # matters is that nothing was ever handed to it.
+    assert "req-cancel" in provider.cancelled
+
+
+def test_a_cancel_after_the_gate_stops_further_chunks() -> None:
+    provider = _ScriptedProvider([_pcm_chunk(index) for index in range(20)])
+    sink = _RecordingSink()
+    controller = VoicePlaybackController(provider, sink, prebuffer_chunks=2)
+
+    async def go():
+        task = await controller.submit(TTSRequest(text="Lang.", id="req-mid"))
+        for _ in range(60):
+            if sink.played:
+                break
+            await asyncio.sleep(0)
+        await controller.cancel("req-mid")
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return len(sink.played)
+
+    played = asyncio.run(go())
+    assert 0 < played < 20
+    assert sink.stops >= 1
+
+
+def test_a_provider_failure_before_the_gate_plays_nothing() -> None:
+    provider = _ScriptedProvider([_pcm_chunk(0)], fail_after=0)
+    sink = _RecordingSink()
+    started: list[str] = []
+    controller = VoicePlaybackController(
+        provider, sink, prebuffer_chunks=2,
+        on_audio_started=lambda event: started.append(event.request_id),
+    )
+    result = asyncio.run(controller.speak(TTSRequest(text="Hallo.", id="req-1")))
+
+    assert result.error
+    assert sink.played == []
+    assert started == []
+
+
+def test_a_provider_failure_after_the_gate_keeps_what_played() -> None:
+    """No invented final chunk, and the existing error semantics stand."""
+    provider = _ScriptedProvider(
+        [_pcm_chunk(0), _pcm_chunk(1), _pcm_chunk(2)], fail_after=2
+    )
+    sink = _RecordingSink()
+    controller = VoicePlaybackController(provider, sink, prebuffer_chunks=2)
+    result = asyncio.run(controller.speak(TTSRequest(text="Hallo.", id="req-1")))
+
+    assert result.error
+    assert sink.sequences == [0, 1]
+    assert not any(chunk.final for chunk in sink.played)
+
+
+def test_the_next_request_works_after_a_failure() -> None:
+    provider = _ScriptedProvider([_pcm_chunk(0)], fail_after=0)
+    sink = _RecordingSink()
+    controller = VoicePlaybackController(provider, sink, prebuffer_chunks=2)
+
+    async def go():
+        first = await controller.speak(TTSRequest(text="Kaputt.", id="a"))
+        controller._provider = _ScriptedProvider([_pcm_chunk(0, final=True)])
+        second = await controller.speak(TTSRequest(text="Geht.", id="b"))
+        return first, second
+
+    first, second = asyncio.run(go())
+    assert first.error
+    assert second.error == ""
+    assert sink.sequences == [0]
+
+
+# --- chunks the gate refuses to hold ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"audio_format": "pcm_f32le"},
+        {"sample_rate": 48_000},
+        {"channels": 2},
+        {"pcm": b""},
+        {"pcm": b"\x01\x02\x03"},
+    ],
+)
+def test_a_chunk_outside_the_pcm_contract_is_never_buffered(overrides) -> None:
+    bad = _pcm_chunk(0, **overrides)
+    good = _pcm_chunk(1, frames=1200, final=True)
+    result, sink, _started = _run_stream([bad, good])
+
+    assert sink.sequences == [1]
+    assert result.error
+
+
+# --- the file route is untouched --------------------------------------------
+
+
+def test_without_a_prebuffer_the_first_chunk_plays_at_once() -> None:
+    """What every existing caller does, and must keep doing.
+
+    Exactly the situation the test above inspects, with the gate switched off:
+    the first chunk plays while the provider is still held.
+    """
+    hold = asyncio.Event()
+    provider = _ScriptedProvider(
+        [_pcm_chunk(0), _pcm_chunk(1, final=True)], hold_after=1, hold=hold
+    )
+    sink = _RecordingSink()
+    controller = VoicePlaybackController(provider, sink)
+
+    async def go():
+        task = await controller.submit(TTSRequest(text="Hallo.", id="req-1"))
+        for _ in range(30):
+            await asyncio.sleep(0)
+        after_one = list(sink.sequences)
+        hold.set()
+        await task
+        return after_one
+
+    after_one = asyncio.run(go())
+    assert after_one == [0], "ohne Prebuffer muss der erste Chunk sofort laufen"
+
+
+def test_the_wav_style_provider_is_unaffected() -> None:
+    """A provider whose chunks are not the streaming shape still plays them all
+    when no prebuffer was asked for."""
+    provider = FakeTTSProvider(chunk_seconds=0.1)
+    sink = FakeAudioSink()
+    controller = VoicePlaybackController(provider, sink)
+
+    async def go():
+        await provider.load()
+        return await controller.speak(TTSRequest(text="Ein längerer Satz zum Testen."))
+
+    result = asyncio.run(go())
+    assert result.chunks > 2
+    assert result.error == ""

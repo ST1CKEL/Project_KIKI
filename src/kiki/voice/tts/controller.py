@@ -26,6 +26,9 @@ from collections.abc import Callable
 from enum import StrEnum
 
 from kiki.voice.tts.models import (
+    DEFAULT_AUDIO_FORMAT,
+    DEFAULT_CHANNELS,
+    DEFAULT_SAMPLE_RATE,
     AudioChunk,
     AudioStartedEvent,
     TTSError,
@@ -39,6 +42,14 @@ log = logging.getLogger(__name__)
 
 # One chunk buffered ahead of the one playing.
 DEFAULT_PREFETCH = 1
+
+# How much audio may be collected before playback starts, for a provider that
+# streams live PCM. The engine runs at RTF ~1.4, so playback drains the buffer
+# faster than it fills; two 400 ms chunks is 0.8 s of cushion for ~1.1 s of
+# added latency, and the cap is stated in bytes as well so a provider that
+# changes its chunk length cannot quietly hold more.
+STREAMING_PREBUFFER_CHUNKS = 2
+STREAMING_PREBUFFER_MAX_BYTES = 38_400
 
 
 class PlaybackState(StrEnum):
@@ -56,17 +67,29 @@ class VoicePlaybackController:
         *,
         prefetch: int = DEFAULT_PREFETCH,
         on_audio_started: Callable[[AudioStartedEvent], None] | None = None,
+        prebuffer_chunks: int = 0,
     ) -> None:
         if int(prefetch) < 1:
             # Not silently corrected: a caller asking for "no buffer" means
             # something the queue cannot express, and guessing hides the bug.
             raise ValueError("prefetch muss mindestens 1 sein")
+        if not 0 <= int(prebuffer_chunks) <= STREAMING_PREBUFFER_CHUNKS:
+            raise ValueError(
+                f"prebuffer_chunks muss zwischen 0 und {STREAMING_PREBUFFER_CHUNKS} liegen"
+            )
         self._provider = provider
         self._sink = sink
         self._prefetch = int(prefetch)
         # Called on the asyncio thread. A GTK listener must marshal it itself;
         # nothing in this package may touch GLib.
         self._on_audio_started = on_audio_started
+        # Off unless the caller asks. Deliberately not derived from
+        # `provider.capabilities().streaming`: that says "chunks arrive
+        # progressively", which is true of the fake provider and of any future
+        # one, while this is a property of *this* playback route — live PCM
+        # whose producer is slower than realtime. Keying on capabilities would
+        # have changed when playback starts for every existing caller.
+        self._prebuffer_chunks = int(prebuffer_chunks)
         self._state = PlaybackState.IDLE
         self._current: TTSRequest | None = None
         self._task: asyncio.Task[TTSGenerationResult] | None = None
@@ -86,6 +109,10 @@ class VoicePlaybackController:
     @property
     def busy(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def prebuffer_chunks(self) -> int:
+        return self._prebuffer_chunks
 
     # --- driving -----------------------------------------------------------
 
@@ -239,35 +266,81 @@ class VoicePlaybackController:
         """
         draining = False
         announced = False
+        # The prebuffer, if the caller asked for one. Bounded twice over — by
+        # chunk count and by bytes — and discarded whole on a cancel, so it can
+        # never become a second queue or hold an entire answer.
+        held: list[AudioChunk] = []
+        held_bytes = 0
+        gate_open = self._prebuffer_chunks <= 0
+
+        async def _flush() -> None:
+            nonlocal announced, held, held_bytes
+            pending, held, held_bytes = held, [], 0
+            for item in pending:
+                announced = await self._deliver(item, result, started, announced)
+
         while True:
             chunk = await queue.get()
             if chunk is None:
+                # The provider ended on its own: whatever is still held is the
+                # whole of a short utterance and plays now.
+                if not draining and held:
+                    await _flush()
                 return
             if draining or request.id in self._cancelled:
                 # Stop making sound immediately, but keep the queue moving.
                 draining = True
                 result.cancelled = True
+                held, held_bytes = [], 0
                 continue
             if chunk.request_id != request.id:
                 # A chunk from a superseded answer must never be heard.
                 continue
-            try:
-                if announced or not chunk.pcm:
-                    # An empty chunk makes no sound, so it may not claim to.
-                    await self._sink.play(chunk)
-                else:
-                    announced = await self._play_first(chunk)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # One bad chunk is skipped; the queue keeps moving.
-                result.error = result.error or _safe_error(exc)
-                log.warning("playback failed for chunk %s: %s", chunk.sequence, result.error)
+            if gate_open:
+                announced = await self._deliver(chunk, result, started, announced)
                 continue
-            if result.time_to_first_audio is None:
-                result.time_to_first_audio = time.perf_counter() - started
-            result.chunks += 1
-            result.audio_seconds += chunk.duration_s
+            if not _is_stream_pcm(chunk):
+                # Same treatment as a chunk the sink refuses: skipped, recorded,
+                # and never buffered.
+                result.error = result.error or "unbrauchbarer Audio-Chunk"
+                log.warning("dropping unusable chunk %s", chunk.sequence)
+                continue
+            held.append(chunk)
+            held_bytes += len(chunk.pcm)
+            if (
+                chunk.final
+                or len(held) >= self._prebuffer_chunks
+                or held_bytes >= STREAMING_PREBUFFER_MAX_BYTES
+            ):
+                gate_open = True
+                await _flush()
+
+    async def _deliver(
+        self,
+        chunk: AudioChunk,
+        result: TTSGenerationResult,
+        started: float,
+        announced: bool,
+    ) -> bool:
+        """Play one chunk and account for it. Returns the new announced state."""
+        try:
+            if announced or not chunk.pcm:
+                # An empty chunk makes no sound, so it may not claim to.
+                await self._sink.play(chunk)
+            else:
+                announced = await self._play_first(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # One bad chunk is skipped; the queue keeps moving.
+            result.error = result.error or _safe_error(exc)
+            log.warning("playback failed for chunk %s: %s", chunk.sequence, result.error)
+            return announced
+        if result.time_to_first_audio is None:
+            result.time_to_first_audio = time.perf_counter() - started
+        result.chunks += 1
+        result.audio_seconds += chunk.duration_s
+        return announced
 
 
     async def _play_first(self, chunk: AudioChunk) -> bool:
@@ -315,6 +388,22 @@ class VoicePlaybackController:
         except Exception:
             # A listener that throws must not silence the rest of the answer.
             log.warning("on_audio_started listener failed for %s", chunk.request_id)
+
+
+def _is_stream_pcm(chunk: AudioChunk) -> bool:
+    """Is this a chunk the PCM route may hold back and hand on unchanged?
+
+    Checked on the chunk's own declared metadata — no file names, no sniffing
+    of the bytes. Anything else is skipped rather than buffered, because the
+    prebuffer must not be the place a malformed chunk first shows up.
+    """
+    return (
+        chunk.audio_format == DEFAULT_AUDIO_FORMAT
+        and chunk.sample_rate == DEFAULT_SAMPLE_RATE
+        and chunk.channels == DEFAULT_CHANNELS
+        and bool(chunk.pcm)
+        and len(chunk.pcm) % 2 == 0
+    )
 
 
 # Provider exceptions quote whatever they choked on. That text reaches
