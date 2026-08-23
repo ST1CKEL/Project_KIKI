@@ -428,6 +428,42 @@ def test_a_rejected_proposal_shows_no_write_in_the_trace(tmp_path) -> None:
 # --- the application wiring, without GTK ------------------------------------
 
 
+class _FakeChat:
+    """Stands in for ChatWindow: records what would become a bubble."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.notes: list[tuple[str, str | None]] = []
+        self.toasts: list[str] = []
+        self._fail = fail
+
+    def append_note(self, text: str, *, toast: str | None = "…") -> None:
+        if self._fail:
+            raise RuntimeError("/home/martin/chat kaputt")
+        self.notes.append((text, toast))
+
+    def show_toast(self, title: str) -> None:
+        self.toasts.append(title)
+
+
+class _FakeSpeech:
+    """Stands in for SpeechDirector: records one-shot utterances."""
+
+    def __init__(self) -> None:
+        self.said: list[str] = []
+        self.fed: list[str] = []
+
+    def say(self, text: str) -> None:
+        self.said.append(text)
+
+    def feed(self, text: str) -> None:  # must never be used for a final answer
+        self.fed.append(text)
+
+
+class _TtsOn:
+    def tts_allowed(self) -> bool:
+        return True
+
+
 class _AppStub:
     """Only what `_build_harness` and the callbacks touch."""
 
@@ -552,6 +588,9 @@ def test_speech_only_happens_when_tts_is_allowed(tmp_path) -> None:
             return False
 
     stub = _AppStub(tmp_path)
+    # A live session: the callbacks drop anything that arrives after shutdown,
+    # and this test is about the TTS switch, not about that guard.
+    stub._harness = object()
     stub._speech = _Speech()
     stub._settings = _Settings()
     _app_method("_apply_harness_speak")(stub, "fertig")
@@ -564,3 +603,243 @@ def test_speech_only_happens_when_tts_is_allowed(tmp_path) -> None:
     stub._settings = _Allowed()
     _app_method("_apply_harness_speak")(stub, "fertig")
     assert spoken == ["fertig"]
+
+
+# --- the harness answer reaches a receiver that really exists ---------------
+#
+# The EventBus is not that receiver: ChatWindow never subscribes to it, it
+# drives itself from ChatService.send(). An event published there would have
+# had no listener whatever it was called — which is why this path goes through
+# `append_note`, the same call the coding summary already uses.
+
+
+def _wired_stub(tmp_path, *, chat=None, speech=None, harness=object()):
+    stub = _AppStub(tmp_path)
+    stub._harness = harness
+    stub._chat = chat
+    stub._speech = speech
+    stub._settings = _TtsOn()
+    for name in ("_apply_harness_answer", "_apply_harness_speak",
+                 "_apply_harness_status", "_harness_delivery_failed"):
+        setattr(type(stub), name, _app_method(name))
+    return stub
+
+
+def test_the_event_bus_is_not_in_the_answer_path_at_all() -> None:
+    """Neither `publish` (which does not exist) nor `emit` (which has no
+    listener for this): the answer goes to a receiver that is real."""
+    from pathlib import Path
+
+    from kiki.runtime.event_bus import EventBus
+
+    assert not hasattr(EventBus, "publish")
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "kiki" / "application.py"
+    ).read_text(encoding="utf-8")
+    harness_block = source[source.index("def _apply_harness_answer"):]
+    harness_block = harness_block[: harness_block.index("def _on_harness_speak")]
+    assert "_bus." not in harness_block
+    assert "chat.assistant.text" not in source
+
+
+def test_the_receiver_is_the_method_the_coding_summary_already_uses() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    assert callable(ChatWindow.append_note)
+
+
+def test_one_answer_becomes_exactly_one_bubble(tmp_path) -> None:
+    chat = _FakeChat()
+    stub = _wired_stub(tmp_path, chat=chat)
+
+    _app_method("_apply_harness_answer")(stub, "Der Harness ist erreichbar.")
+
+    assert chat.notes == [("Der Harness ist erreichbar.", None)]
+    assert chat.toasts == [], "kein fremder Toast wie die Coding-Zusammenfassung"
+
+
+def test_the_same_text_is_spoken_exactly_once(tmp_path) -> None:
+    speech = _FakeSpeech()
+    stub = _wired_stub(tmp_path, chat=_FakeChat(), speech=speech)
+    text = "Der Harness ist erreichbar."
+
+    _app_method("_apply_harness_answer")(stub, text)
+    _app_method("_apply_harness_speak")(stub, text)
+
+    assert speech.said == [text]
+    assert speech.fed == [], "ein Final ist kein Tokenstrom"
+
+
+def test_two_deliveries_of_the_same_callback_are_two_bubbles(tmp_path) -> None:
+    """Guard against the opposite mistake: the callback must not fan out on its
+    own. One call in, one bubble out — deduplication is the session's job."""
+    chat = _FakeChat()
+    speech = _FakeSpeech()
+    stub = _wired_stub(tmp_path, chat=chat, speech=speech)
+
+    _app_method("_apply_harness_answer")(stub, "x")
+    assert len(chat.notes) == 1
+
+
+def test_without_a_chat_window_the_answer_still_arrives(tmp_path) -> None:
+    stub = _wired_stub(tmp_path, chat=None)
+    _app_method("_apply_harness_answer")(stub, "Alles gut.")
+    assert stub.toasts == ["Alles gut."]
+
+
+# --- what must not be delivered ---------------------------------------------
+
+
+def test_a_cancelled_run_delivers_neither_text_nor_speech(tmp_path) -> None:
+    chat = _FakeChat()
+    speech = _FakeSpeech()
+    recorder = Recorder()
+    workspace = NotesWorkspace(tmp_path / "notes")
+    registry = ToolRegistry()
+    registry.register(SystemStatusTool(uptime=lambda: 1.0))
+
+    class _Waiting:
+        async def next_action(self, *, user_text, tool_schemas, observations, cancel_token):
+            del user_text, tool_schemas, observations
+            for _ in range(5000):
+                if cancel_token.cancelled:
+                    return ModelAction.answer("zu spät")
+                await asyncio.sleep(0.001)
+            raise AssertionError("nie freigegeben")
+
+    runner = AgentRunner(_Waiting(), registry, trace_dir=tmp_path / "traces")
+    session = HarnessSession(runner, recorder.callbacks())
+
+    async def go():
+        task = session.start("Wie ist dein Status?")
+        for _ in range(2000):
+            if runner.active_run_id:
+                break
+            await asyncio.sleep(0.001)
+        session.cancel()
+        return await task
+
+    run = asyncio.run(go())
+
+    assert run.status is RunStatus.CANCELLED
+    assert recorder.answers == []
+    assert recorder.spoken == []
+    assert chat.notes == []
+    assert speech.said == []
+    assert _notes(workspace) == []
+
+
+def test_a_failed_run_speaks_no_success(tmp_path) -> None:
+    session, _runner, recorder, _workspace = _build(
+        tmp_path, [ModelAction(ActionKind.FINAL)]
+    )
+    run = asyncio.run(session.ask("was auch immer"))
+
+    assert run.status is RunStatus.FAILED
+    assert recorder.answers == ["Ich habe mich vertan."]
+    assert recorder.spoken == ["Ich habe mich vertan."]
+    assert not any("fertig" in line or "erreichbar" in line for line in recorder.spoken)
+
+
+def test_a_rejected_proposal_speaks_no_success(tmp_path) -> None:
+    session, _runner, recorder, workspace = _build(
+        tmp_path, [ModelAction.call("create_note", NOTE_ARGS)], auto=_reject
+    )
+    asyncio.run(session.ask("Lege eine Notiz an."))
+
+    assert _notes(workspace) == []
+    assert recorder.spoken == [SPEECH_NEEDS_CONFIRMATION, "Gut, ich lege nichts an."]
+    assert not any("angelegt" in line for line in recorder.spoken)
+
+
+def test_a_waiting_proposal_claims_no_success(tmp_path) -> None:
+    """`NEEDS_CONFIRMATION` gets the one agreed sentence and a status, nothing
+    that sounds like the note already exists."""
+    session, _runner, recorder, workspace = _build(
+        tmp_path, [ModelAction.call("create_note", NOTE_ARGS)],
+        auto=lambda session, _request: session.cancel(),
+    )
+    asyncio.run(session.ask("Lege eine Notiz an."))
+
+    assert recorder.spoken == [SPEECH_NEEDS_CONFIRMATION]
+    assert STATUS_NEEDS_CONFIRMATION in recorder.status
+    assert recorder.answers == []
+    assert _notes(workspace) == []
+
+
+# --- delivery failures and shutdown -----------------------------------------
+
+
+def test_a_delivery_failure_becomes_a_category(tmp_path) -> None:
+    chat = _FakeChat(fail=True)
+    stub = _wired_stub(tmp_path, chat=chat)
+
+    _app_method("_apply_harness_answer")(stub, "Antwort")
+
+    assert stub.toasts == ["KIKI konnte die Antwort nicht anzeigen."]
+    assert not any("/home/" in line for line in stub.toasts)
+    assert not any("Traceback" in line for line in stub.toasts)
+
+
+def test_a_later_answer_works_after_a_delivery_failure(tmp_path) -> None:
+    chat = _FakeChat(fail=True)
+    stub = _wired_stub(tmp_path, chat=chat)
+    _app_method("_apply_harness_answer")(stub, "erste")
+
+    chat._fail = False
+    _app_method("_apply_harness_answer")(stub, "zweite")
+
+    assert chat.notes == [("zweite", None)]
+
+
+def test_a_delivery_failure_leaves_a_pending_proposal_untouched(tmp_path) -> None:
+    """A broken chat must never be a reason to write something."""
+    session, _runner, _recorder, workspace = _build(
+        tmp_path, [ModelAction.call("create_note", NOTE_ARGS)],
+        auto=lambda session, _request: session.cancel(),
+    )
+    chat = _FakeChat(fail=True)
+    stub = _wired_stub(tmp_path, chat=chat, harness=session)
+    _app_method("_apply_harness_answer")(stub, "irgendetwas")
+
+    asyncio.run(session.ask("Lege eine Notiz an."))
+    assert _notes(workspace) == []
+
+
+@pytest.mark.parametrize(
+    "method", ["_apply_harness_answer", "_apply_harness_speak", "_apply_harness_status"]
+)
+def test_a_late_callback_after_shutdown_does_nothing(tmp_path, method) -> None:
+    """Callbacks already sitting in the idle queue when the app closed."""
+    chat = _FakeChat()
+    speech = _FakeSpeech()
+    stub = _wired_stub(tmp_path, chat=chat, speech=speech, harness=None)
+
+    _app_method(method)(stub, "verspätet")
+
+    assert chat.notes == []
+    assert speech.said == []
+    assert stub.toasts == []
+
+
+def test_speech_stays_off_when_tts_is_not_allowed(tmp_path) -> None:
+    class _Off:
+        def tts_allowed(self) -> bool:
+            return False
+
+    speech = _FakeSpeech()
+    stub = _wired_stub(tmp_path, chat=_FakeChat(), speech=speech)
+    stub._settings = _Off()
+    _app_method("_apply_harness_speak")(stub, "Antwort")
+
+    assert speech.said == []
+
+
+def test_the_chat_window_never_speaks_by_itself() -> None:
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "kiki" / "ui" / "chat_window.py"
+    ).read_text(encoding="utf-8")
+    for forbidden in ("SpeechDirector", "_speech", "say("):
+        assert forbidden not in source, forbidden

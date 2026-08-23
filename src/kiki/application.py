@@ -278,6 +278,8 @@ class KikiApplication(Adw.Application):
         GLib.idle_add(self._apply_harness_status, text)
 
     def _apply_harness_status(self, text: str) -> bool:
+        if self._harness is None:
+            return False
         self._toast(text)
         return False
 
@@ -285,16 +287,51 @@ class KikiApplication(Adw.Application):
         GLib.idle_add(self._apply_harness_answer, text)
 
     def _apply_harness_answer(self, text: str) -> bool:
-        if self._chat is not None:
-            self._bus.publish("chat.assistant.text", text=text)
-        else:
-            self.notify_status("KIKI", text)
+        """Put one finished answer into the chat the user already has.
+
+        Through `append_note`, the same call the coding summary uses: it creates
+        the conversation if needed, stores the text as an assistant message and
+        adds one bubble. Not through the EventBus — `ChatWindow` does not listen
+        to it at all, it drives itself from `ChatService.send()`. The bus is a
+        side channel for the character state machine and for voice, so an event
+        published there would have had no receiver whichever name it carried.
+
+        No fake token stream either: the harness produces one complete answer,
+        and pretending it arrived in pieces would only invent work.
+        """
+        if self._harness is None:
+            # Shutdown happened while this sat in the idle queue.
+            return False
+        try:
+            if self._chat is not None:
+                self._chat.append_note(text, toast=None)
+            else:
+                self.notify_status("KIKI", text)
+        except Exception:
+            # A delivery failure is a category, never a traceback into GTK, and
+            # it must leave any pending confirmation exactly as it was.
+            log.warning("harness answer could not be delivered")
+            self._harness_delivery_failed()
         return False
+
+    def _harness_delivery_failed(self) -> None:
+        try:
+            self._toast("KIKI konnte die Antwort nicht anzeigen.")
+        except Exception:
+            log.debug("could not report the delivery failure either", exc_info=True)
 
     def _on_harness_speak(self, text: str) -> None:
         GLib.idle_add(self._apply_harness_speak, text)
 
     def _apply_harness_speak(self, text: str) -> bool:
+        """Speak one finished answer through the existing one-shot path.
+
+        `SpeechDirector.say` is what the greeting, the watcher notices and the
+        voice test already use; `feed`/`flush` belong to a token stream and this
+        is not one.
+        """
+        if self._harness is None:
+            return False
         if self._settings.tts_allowed() and self._speech is not None:
             self._speech.say(text)
         return False

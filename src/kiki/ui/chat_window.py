@@ -436,8 +436,16 @@ class ChatWindow(Adw.ApplicationWindow):
             return
         handoff(task)
 
-    def append_note(self, text: str) -> None:
-        """Show a local note in the open chat and persist it as assistant text."""
+    def append_note(
+        self, text: str, *, toast: str | None = "Coding-Zusammenfassung im Chat."
+    ) -> None:
+        """Show a local note in the open chat and persist it as assistant text.
+
+        `toast` was hard-coded to the coding summary, which was true of the only
+        caller at the time. A second caller with a different message would have
+        announced the wrong thing, so the line is now the caller's to choose —
+        the default keeps the existing one exactly as it was.
+        """
         if self._conversation is None:
             self._new_conversation()
         assert self._conversation is not None
@@ -447,7 +455,8 @@ class ChatWindow(Adw.ApplicationWindow):
         self._chats.add_message(self._conversation.id, "assistant", body)
         self._messages.append(ChatBubble("assistant", body))
         self._scroll_to_end()
-        self.show_toast("Coding-Zusammenfassung im Chat.")
+        if toast:
+            self.show_toast(toast)
 
     def submit_transcript(self, text: str, *, send: bool) -> None:
         self._input.get_buffer().set_text(text)
