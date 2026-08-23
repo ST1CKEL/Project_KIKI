@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="docs/design/KIKI-v3-adult-concept.png" alt="KIKI v3 Adult Concept" width="320" />
+<img src="docs/design/project-kiki-banner.png" alt="Project KIKI Banner" width="720" />
 
 ### **Dein intelligenter, lokaler KI-Begleiter für Fedora Linux (GNOME / Wayland)**
 
