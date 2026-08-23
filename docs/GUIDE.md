@@ -200,7 +200,6 @@ KIKI folgt einem strikten Sicherheitsmodell (**Default Deny**):
   - Auswahl zwischen lokalem Ollama (`qwen3-vl:4b`, `qwen3-vl:8b`, `gemma3:4b`) oder OpenAI-kompatiblen Endpunkten.
   - Eingabe und sichere Speicherung von API-Keys im **GNOME Keyring** (über `libsecret`).
 - **Erscheinungsbild:**
-  - Wechsel zwischen dem Standard-Pack `kiki-adult-v3` und dem Chibi-Pack `kiki`.
   - Anpassung der Ankergröße und Fenster-Deckkraft.
 - **Persona & Tonfall:**
   - Wähle den Charakterton (z. B. Hilfsbereit, Professionell, Humorvoll).

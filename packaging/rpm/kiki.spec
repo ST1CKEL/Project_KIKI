@@ -137,7 +137,7 @@ bash -n scripts/setup-local-model.sh scripts/setup-tts.sh scripts/setup-llm.sh \
 
 %files
 %license LICENSE
-%doc README.md docs/ARCHITECTURE.md docs/KIKI_V2.md docs/design/KIKI-v2-canonical.png docs/design/KIKI-v3-adult-concept.png
+%doc README.md docs/ARCHITECTURE.md docs/CHARACTER_DESIGN.md docs/GUIDE.md docs/DEVELOPER_GUIDE.md docs/VOICE_SUBSYSTEM.md docs/design/KIKI-v3-adult-concept.png
 %{_bindir}/kiki
 %{_bindir}/kiki-setup-model
 %{_bindir}/kiki-setup-tts

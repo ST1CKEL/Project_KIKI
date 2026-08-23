@@ -53,16 +53,11 @@
 
 ## 🎨 Charakter-Design & Zustände
 
-KIKI verfügt über zwei kuratierte Design-Packs mit jeweils 12 handgezeichneten und normalisierten Zuständen auf einem 512×512 Canvas:
-
-1. **`kiki-adult-v3` (Standard):** Reifere Silhouette, ruhige und souveräne Ausstrahlung.
-2. **`kiki` (Kanonischer Chibi-Stil):** Kompakter Erstentwurf im Anime-Chibi-Look.
+KIKI verfügt über ein detailreiches, handgezeichnetes Charakter-Design mit 12 normalisierten Zuständen auf einem 512×512 Canvas:
 
 <div align="center">
 
-| KIKI v3 (Standard) | KIKI v2 (Canonical Chibi) |
-|:---:|:---:|
-| <img src="docs/design/KIKI-v3-adult-concept.png" width="260" alt="KIKI Adult v3" /> | <img src="docs/design/KIKI-v2-canonical.png" width="260" alt="KIKI Canonical" /> |
+<img src="docs/design/KIKI-v3-adult-concept.png" width="280" alt="KIKI Charakter-Design" />
 
 </div>
 
@@ -305,7 +300,7 @@ Ausführliche Latenzanalysen und Architekturdetails: [docs/VOICE_SUBSYSTEM.md](d
 - [🛠️ Entwicklerhandbuch (Developer Guide)](docs/DEVELOPER_GUIDE.md) – Bauen, Testen, RPM-Paketierung und Erstellung eigener Sprite-Packs.
 - [🎙️ Voice Subsystem Architektur](docs/VOICE_SUBSYSTEM.md) – STT/TTS-Pipeline, Streaming-Pufferung und PipeWire-Integration.
 - [🏛️ Systemarchitektur & Wayland-Design](docs/ARCHITECTURE.md) – Tiefgehende Architektur- und Sicherheitsdokumentation.
-- [🎨 KIKI v2 & v3 Charakter-Design](docs/KIKI_V2.md) – Canvas-Spezifikationen und Animationsclips.
+- [🎨 KIKI Charakter-Design](docs/CHARACTER_DESIGN.md) – Canvas-Spezifikationen und Animationsclips.
 
 ---
 
