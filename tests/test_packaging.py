@@ -123,6 +123,29 @@ def test_every_harness_module_is_packaged() -> None:
         assert required in modules, f"{required} fehlt im Harness-Verzeichnis"
 
 
+def test_every_tts_service_module_is_packaged() -> None:
+    """kiki_tts_server.py imports its siblings from its own directory.
+
+    Both install paths named that one file, so a sibling module would have
+    shipped a service that cannot start — the same way batching.py once nearly
+    missed the harness.
+    """
+    spec = (PROJECT_ROOT / "packaging/rpm/kiki.spec").read_text(encoding="utf-8")
+    setup = (PROJECT_ROOT / "scripts/setup-tts.sh").read_text(encoding="utf-8")
+
+    assert "for part in services/qwen3-tts/*.py; do" in spec
+    assert 'for part in "$(dirname "$SERVER_SOURCE")"/*.py; do' in setup
+
+    # The spike pulls in torch and is a measurement tool, not part of the
+    # service. Neither path may ship it.
+    assert "streaming_spike.py) continue" in spec
+    assert 'streaming_spike.py" ]] && continue' in setup
+
+    modules = sorted(p.name for p in (PROJECT_ROOT / "services" / "qwen3-tts").glob("*.py"))
+    for required in ("kiki_tts_server.py", "streaming_http.py"):
+        assert required in modules, f"{required} fehlt im Dienstverzeichnis"
+
+
 def test_every_setup_entry_point_is_linked_and_listed() -> None:
     """A %files entry landing in %install by mistake broke the build once."""
     spec = (PROJECT_ROOT / "packaging/rpm/kiki.spec").read_text(encoding="utf-8")

@@ -15,14 +15,32 @@ import io
 import json
 import logging
 import math
+import select
+import socket
 import struct
 import sys
 import threading
 import traceback
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+# Installed side by side (RPM: %{_libexecdir}/kiki, setup-tts: ~/.local/share).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from streaming_http import (  # noqa: E402
+    STREAM_CHANNELS,
+    STREAM_FORMAT,
+    STREAM_SAMPLE_RATE,
+    CancelToken,
+    StreamGate,
+    StreamValidationError,
+    pump_pcm,
+    validate_stream_request,
+)
 
 log = logging.getLogger("kiki-tts")
 
@@ -33,6 +51,10 @@ DEFAULT_SPEAKER = "Serena"
 DEFAULT_LANGUAGE = "German"
 MAX_TEXT_CHARS = 4000
 MAX_BODY_BYTES = 256 * 1024
+# How long a streaming write waits before re-checking whether anyone is
+# still listening. Short enough to stop the GPU quickly, long enough not to
+# spin on a client that is merely slow.
+STREAM_SELECT_TIMEOUT = 0.25
 
 CUSTOM_VOICE_SPEAKERS = [
     "Vivian",
@@ -181,7 +203,13 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
 
 class TtsHandler(BaseHTTPRequestHandler):
     synthesizer: Any = None
+    # Optional. Absent or unavailable means the stream route answers 503 and
+    # nothing about the WAV route changes.
+    stream_engine: Any = None
     synth_lock = threading.Lock()
+    # The streaming route takes this with a timeout instead of waiting: one
+    # model, one generation, and a second caller is told rather than queued.
+    stream_lock = threading.Lock()
     server_version = "kiki-tts/0.1"
 
     def log_message(self, fmt: str, *args: object) -> None:
@@ -215,6 +243,11 @@ class TtsHandler(BaseHTTPRequestHandler):
                     "model": str(getattr(synth, "model_id", getattr(synth, "model", ""))),
                     "speakers": list(getattr(synth, "speakers", CUSTOM_VOICE_SPEAKERS)),
                     "languages": list(getattr(synth, "languages", CUSTOM_VOICE_LANGUAGES)),
+                    # A client must be able to see whether the PCM route exists
+                    # *before* it starts an answer with it.
+                    "streaming": self._streaming_available(),
+                    "stream_format": STREAM_FORMAT,
+                    "stream_sample_rate": STREAM_SAMPLE_RATE,
                 },
             )
             return
@@ -225,8 +258,159 @@ class TtsHandler(BaseHTTPRequestHandler):
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 
+    # --- PCM streaming ----------------------------------------------------
+
+    def _streaming_available(self) -> bool:
+        engine = self.stream_engine
+        return bool(engine is not None and getattr(engine, "available", False))
+
+    def _read_json_body(self) -> dict[str, Any] | None:
+        """Read and decode the request body, answering the caller on failure."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json(400, {"ok": False, "error": "Content-Length fehlt"})
+            return None
+        if length <= 0 or length > MAX_BODY_BYTES:
+            self._send_json(413, {"ok": False, "error": "Anfrage zu groß"})
+            return None
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json(400, {"ok": False, "error": "JSON ungültig"})
+            return None
+        if not isinstance(payload, dict):
+            self._send_json(400, {"ok": False, "error": "JSON-Objekt erwartet"})
+            return None
+        return payload
+
+    def _send_stream_headers(self, spec: Any) -> None:
+        """Everything the client needs, before the first sample.
+
+        No Content-Length and no Transfer-Encoding: this is a connection-close
+        stream, and `X-KIKI-Transfer` says so rather than leaving the client to
+        infer it. See streaming_http for why not HTTP/1.1 chunked.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/pcm")
+        self.send_header("X-KIKI-Audio-Format", STREAM_FORMAT)
+        self.send_header("X-KIKI-Sample-Rate", str(STREAM_SAMPLE_RATE))
+        self.send_header("X-KIKI-Channels", str(STREAM_CHANNELS))
+        self.send_header("X-KIKI-Streaming", "true")
+        self.send_header("X-KIKI-Chunk-Ms", str(spec.chunk_ms))
+        self.send_header("X-KIKI-Transfer", "connection-close")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _peer_gone(self) -> bool:
+        """Has the listener left? Asked between chunks, never blocking.
+
+        `Connection: close` means the client sends nothing more, so a socket
+        that has become readable can only be reporting EOF. MSG_PEEK leaves the
+        byte in place for the unlikely case that it is not.
+        """
+        conn = getattr(self, "connection", None)
+        if conn is None:
+            return False
+        try:
+            ready, _writable, _err = select.select([conn], [], [], 0)
+            if not ready:
+                return False
+            return conn.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
+    def _write_stream(self, data: bytes) -> None:
+        """Send one PCM block without ever blocking past a disconnect.
+
+        `wfile.write` uses sendall, which parks the thread as soon as the send
+        buffer fills — measured at ~2.7 MB, by which point the generator had
+        produced 144 chunks for a listener that left after one. Selecting before
+        each slice keeps a slow-but-present client working (that is backpressure,
+        and correct) while noticing a departed one within SELECT_TIMEOUT.
+        """
+        conn = self.connection
+        view = memoryview(data)
+        while view:
+            readable, writable, _err = select.select([conn], [conn], [], STREAM_SELECT_TIMEOUT)
+            if readable and conn.recv(1, socket.MSG_PEEK) == b"":
+                raise BrokenPipeError("client closed the connection")
+            if not writable:
+                continue
+            view = view[conn.send(view):]
+
+    def _do_stream(self) -> None:
+        engine = self.stream_engine
+        if not self._streaming_available():
+            self._send_json(
+                503, {"ok": False, "streaming": False, "error": "Streaming nicht verfügbar"}
+            )
+            return
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        synth = self.synthesizer
+        speakers = list(getattr(synth, "speakers", CUSTOM_VOICE_SPEAKERS))
+        languages = list(getattr(synth, "languages", CUSTOM_VOICE_LANGUAGES))
+        try:
+            spec = validate_stream_request(
+                payload,
+                speakers=speakers,
+                languages=languages,
+                default_language=DEFAULT_LANGUAGE,
+                default_speaker=DEFAULT_SPEAKER,
+                max_text_chars=MAX_TEXT_CHARS,
+            )
+        except StreamValidationError as exc:
+            self._send_json(exc.status, {"ok": False, "error": str(exc)})
+            return
+
+        gate = StreamGate(self.stream_lock)
+        if not gate.acquire():
+            self._send_json(
+                503, {"ok": False, "error": "Eine Generation läuft bereits"}
+            )
+            return
+
+        token = CancelToken()
+        try:
+            outcome = pump_pcm(
+                engine.stream(spec, token),
+                on_first=lambda: self._send_stream_headers(spec),
+                write=self._write_stream,
+                token=token,
+                peer_gone=self._peer_gone,
+            )
+        except Exception as exc:
+            # Nothing left the socket yet, so the failure can still be an
+            # honest HTTP status instead of silence.
+            log.warning("stream failed before first byte: %s", type(exc).__name__)
+            self._send_json(500, {"ok": False, "error": "Generierung fehlgeschlagen"})
+            return
+        finally:
+            token.cancel()
+            gate.release()
+
+        # Request id only — never the text, and never an exception message.
+        log.info(
+            "stream id=%s chunks=%d bytes=%d audio=%.2fs cancelled=%s disconnected=%s%s",
+            spec.request_id or "-",
+            outcome.chunks,
+            outcome.bytes_sent,
+            outcome.audio_seconds,
+            outcome.cancelled,
+            outcome.disconnected,
+            f" error={outcome.error}" if outcome.error else "",
+        )
+
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path in {"/v1/synthesize/stream", "/synthesize/stream"}:
+            self._do_stream()
+            return
         if path not in {"/v1/synthesize", "/synthesize"}:
             self._send_json(404, {"ok": False, "error": "not found"})
             return

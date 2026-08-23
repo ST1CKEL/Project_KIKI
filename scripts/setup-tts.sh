@@ -64,6 +64,13 @@ fi
 
 mkdir -p "$DATA" "$UNIT_DIR"
 cp -f "$SERVER_SOURCE" "$DATA/kiki_tts_server.py"
+# The server imports its siblings from its own directory, so they travel with it.
+for part in "$(dirname "$SERVER_SOURCE")"/*.py; do
+  [[ -f "$part" ]] || continue
+  # The spike is a measurement tool, not part of the service.
+  [[ "$(basename "$part")" == "streaming_spike.py" ]] && continue
+  cp -f "$part" "$DATA/$(basename "$part")"
+done
 
 if [[ "$DUMMY" -eq 0 ]]; then
   if [[ ! -x "$VENV/bin/python" ]]; then

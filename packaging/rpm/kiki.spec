@@ -98,8 +98,14 @@ install -Dm0755 scripts/setup-local-model.sh \
   %{buildroot}%{_libexecdir}/kiki/setup-local-model
 install -Dm0755 scripts/setup-tts.sh \
   %{buildroot}%{_libexecdir}/kiki/setup-tts
-install -Dm0755 services/qwen3-tts/kiki_tts_server.py \
-  %{buildroot}%{_libexecdir}/kiki/kiki_tts_server.py
+# Globbed, not named: kiki_tts_server.py imports its siblings, and a module
+# added here but forgotten in this list would ship a service that cannot start.
+for part in services/qwen3-tts/*.py; do
+  # streaming_spike.py is a measurement tool that pulls in torch; it is not
+  # part of the service and must not reach an installed system.
+  case "$(basename "$part")" in streaming_spike.py) continue ;; esac
+  install -Dm0755 "$part" %{buildroot}%{_libexecdir}/kiki/"$(basename "$part")"
+done
 install -Dm0755 scripts/setup-llm.sh \
   %{buildroot}%{_libexecdir}/kiki/setup-llm
 # Install every harness module rather than a hand-kept list: a file added to
