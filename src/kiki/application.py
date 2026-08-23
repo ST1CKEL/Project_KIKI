@@ -204,24 +204,27 @@ class KikiApplication(Adw.Application):
         if not self._settings.tts.use_controller_route:
             return None
         try:
-            from kiki.voice.tts.adapters import PipeWireAudioSink, ServiceTTSProvider
+            from kiki.voice.tts.composition import build_controller_route
             from kiki.voice.tts.controller import VoicePlaybackController
 
             tts = self._settings.tts
-            provider = ServiceTTSProvider(
-                tts.base_url, speaker=tts.speaker, language=tts.language
+            # Which pair, and how much to hold back, is decided in one place.
+            # Nothing about streaming is chosen here.
+            route = build_controller_route(
+                base_url=tts.base_url, speaker=tts.speaker, language=tts.language
             )
             # synthesize() refuses to run before load(), and load() is a health
             # probe against the service — so it belongs on the bridge, not here
             # on the GTK thread during startup.
             self._bridge.submit(
-                provider.load(),
+                route.provider.load(),
                 on_error=self._on_voice_route_unavailable,
             )
             self._voice_controller = VoicePlaybackController(
-                provider,
-                PipeWireAudioSink(),
+                route.provider,
+                route.sink,
                 on_audio_started=self._on_voice_audio_started,
+                prebuffer_chunks=route.prebuffer_chunks,
             )
             return self._voice_controller
         except Exception:

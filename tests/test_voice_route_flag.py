@@ -922,8 +922,16 @@ def test_the_failure_log_carries_no_configuration_values(monkeypatch, caplog) ->
     with caplog.at_level("DEBUG"):
         _build(stub)
 
-    assert "secret.internal" not in caplog.text
-    assert "sk-live-4711" not in caplog.text
+    # KIKI's own loggers only. Since the composition root probes /health during
+    # startup, httpcore logs the host it dialled at DEBUG — third-party output
+    # KIKI does not control and that its default INFO level never emits.
+    ours = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name.startswith("kiki")
+    )
+    assert "secret.internal" not in ours
+    assert "sk-live-4711" not in ours
 
 
 def test_a_controller_that_never_built_leaves_the_file_route_running(tmp_path: Path) -> None:
@@ -1213,3 +1221,129 @@ def test_a_paused_character_is_never_woken_by_audio() -> None:
     KikiApplication._on_tts_audio_started(stub)
 
     assert stub._machine.state is CharacterState.PAUSED
+
+
+# --- the application takes what the composition root decided ----------------
+
+
+class _RouteAppStub:
+    """Only the attributes `_build_voice_controller` touches."""
+
+    def __init__(self, *, use_controller_route: bool = True) -> None:
+        self._voice_controller = None
+        self._speech = None
+        self.submitted: list[object] = []
+        outer = self
+
+        class _Tts:
+            base_url = "http://127.0.0.1:18765"
+            speaker = "Serena"
+            language = "German"
+
+        _Tts.use_controller_route = use_controller_route
+
+        class _Settings:
+            tts = _Tts()
+
+        class _Bridge:
+            def submit(self, coro, **_kwargs):
+                outer.submitted.append(coro)
+                coro.close()
+                return None
+
+        self._settings = _Settings()
+        self._bridge = _Bridge()
+
+    def _on_voice_audio_started(self, event: object) -> None:
+        return None
+
+    def _on_voice_route_unavailable(self, exc: BaseException) -> None:
+        return None
+
+
+def _build_app_route(stub):
+    from kiki.application import KikiApplication
+
+    return KikiApplication._build_voice_controller(stub)
+
+
+class _Marker:
+    """A stand-in provider/sink that only needs to be identifiable."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def load(self) -> None:
+        return None
+
+
+def _fake_route(monkeypatch, *, prebuffer: int, streaming: bool, reason: str = ""):
+    import kiki.voice.tts.composition as composition
+
+    seen: dict = {}
+
+    def _build(**kwargs):
+        seen.update(kwargs)
+        return composition.VoiceRoute(
+            provider=_Marker("provider"),
+            sink=_Marker("sink"),
+            prebuffer_chunks=prebuffer,
+            streaming=streaming,
+            reason=reason,
+        )
+
+    monkeypatch.setattr(composition, "build_controller_route", _build)
+    return seen
+
+
+def test_the_application_takes_the_streaming_prebuffer_from_the_route(monkeypatch) -> None:
+    seen = _fake_route(monkeypatch, prebuffer=2, streaming=True)
+    stub = _RouteAppStub()
+
+    controller = _build_app_route(stub)
+
+    assert controller is not None
+    assert controller.prebuffer_chunks == 2
+    assert seen["base_url"] == "http://127.0.0.1:18765"
+    assert seen["speaker"] == "Serena"
+    assert seen["language"] == "German"
+    assert len(stub.submitted) == 1, "provider.load() gehört auf die Bridge"
+
+
+def test_the_application_takes_the_wav_prebuffer_from_the_route(monkeypatch) -> None:
+    _fake_route(monkeypatch, prebuffer=0, streaming=False, reason="streaming_off")
+    controller = _build_app_route(_RouteAppStub())
+
+    assert controller is not None
+    assert controller.prebuffer_chunks == 0
+
+
+def test_the_flag_still_decides_whether_a_route_is_built_at_all(monkeypatch) -> None:
+    """`use_controller_route` gates the controller route; it says nothing about
+    streaming, and must not be read as saying so."""
+    import kiki.voice.tts.composition as composition
+
+    called: list[int] = []
+    monkeypatch.setattr(
+        composition,
+        "build_controller_route",
+        lambda **_kwargs: called.append(1),
+    )
+    stub = _RouteAppStub(use_controller_route=False)
+
+    assert _build_app_route(stub) is None
+    assert called == []
+    assert stub.submitted == []
+
+
+def test_a_failing_composition_leaves_the_file_route_in_charge(monkeypatch) -> None:
+    import kiki.voice.tts.composition as composition
+
+    def _boom(**_kwargs):
+        raise RuntimeError("kaputt")
+
+    monkeypatch.setattr(composition, "build_controller_route", _boom)
+    stub = _RouteAppStub()
+
+    assert _build_app_route(stub) is None
+    assert stub._voice_controller is None
