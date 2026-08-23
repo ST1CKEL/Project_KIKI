@@ -139,7 +139,8 @@ class AgentRunner:
         self._release()
         return True
 
-    async def run(self, user_text: str) -> AgentRun:
+    def begin(self, user_text: str) -> AgentRun:
+        """Create and arm one run. Raises `RunBusyError` if one is active."""
         if self._active is not None:
             raise RunBusyError("ein Run läuft bereits")
         run = AgentRun(user_text=user_text)
@@ -148,6 +149,13 @@ class AgentRunner:
         self._token = token
         self._pending.clear()
         self._approved = None
+        return run
+
+    async def drive(self, run: AgentRun) -> AgentRun:
+        """Execute one previously begun run to completion."""
+        if self._active is not run or self._token is None:
+            raise RuntimeError("nur ein begonnener Run kann ausgeführt werden")
+        token = self._token
         try:
             return await self._drive(run, token)
         finally:
@@ -156,6 +164,10 @@ class AgentRunner:
             self._pending.clear()
             self._approved = None
             self._decision = None
+
+    async def run(self, user_text: str) -> AgentRun:
+        run = self.begin(user_text)
+        return await self.drive(run)
 
     # --- internals ---------------------------------------------------------
 

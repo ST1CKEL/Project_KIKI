@@ -59,6 +59,38 @@ _TERMINAL: frozenset[RunStatus] = frozenset(
     {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.FAILED, RunStatus.LIMIT_REACHED}
 )
 
+HARNESS_MESSAGE_CODES: frozenset[str] = frozenset(
+    {
+        "working",
+        "tool_running",
+        "needs_confirmation",
+        "completed",
+        "cancelled",
+        "failed",
+        "limit_reached",
+    }
+)
+
+
+@dataclass(frozen=True)
+class HarnessStatusEvent:
+    """Structured, run-bound status transition. No internal or private details."""
+
+    run_id: str
+    status: RunStatus
+    message_code: str
+    terminal: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.run_id, str) or not self.run_id.strip():
+            raise ValueError("run_id darf nicht leer sein")
+        if not isinstance(self.status, RunStatus):
+            raise ValueError(f"ungültiger RunStatus: {self.status}")
+        if self.message_code not in HARNESS_MESSAGE_CODES:
+            raise ValueError(f"unbekannter message_code: {self.message_code}")
+        if self.terminal != self.status.is_terminal:
+            raise ValueError(f"terminal={self.terminal} stimmt nicht mit Status {self.status} überein")
+
 
 class ActionKind(StrEnum):
     TOOL_CALL = "tool_call"

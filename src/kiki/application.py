@@ -15,6 +15,8 @@ from kiki.ai.chat_service import ChatService
 from kiki.character.assets import ensure_character_pack
 from kiki.character.state_machine import CharacterState, CharacterStateMachine
 from kiki.config.settings import Settings, load_settings, save_settings
+from kiki.harness.confirmation import ConfirmationRequest
+from kiki.harness.models import HarnessStatusEvent
 from kiki.integrations.datetime import DateTimeIntegration
 from kiki.integrations.disk import DiskIntegration
 from kiki.integrations.networkmanager import NetworkManagerIntegration
@@ -271,16 +273,43 @@ class KikiApplication(Adw.Application):
             return False
         return True
 
+    def cancel_harness(self, run_id: str | None = None) -> bool:
+        """Cancel the active harness run. Returns False when there is none."""
+        if self._harness is None:
+            return False
+        return self._harness.cancel(run_id=run_id)
+
     # Every callback below arrives on the asyncio thread and hops to GTK, the
     # same way the wake word and the watcher already report.
 
-    def _on_harness_status(self, text: str) -> None:
-        GLib.idle_add(self._apply_harness_status, text)
+    def _on_harness_status(self, event: HarnessStatusEvent) -> None:
+        GLib.idle_add(self._apply_harness_status, event)
 
-    def _apply_harness_status(self, text: str) -> bool:
+    def _apply_harness_status(self, event: HarnessStatusEvent) -> bool:
         if self._harness is None:
             return False
-        self._toast(text)
+        try:
+            if self._chat is not None and hasattr(self._chat, "set_harness_status"):
+                self._chat.set_harness_status(
+                    run_id=event.run_id,
+                    message_code=event.message_code,
+                    terminal=event.terminal,
+                )
+            elif event.message_code != "completed":
+                _FALLBACK = {
+                    "working": "KIKI arbeitet …",
+                    "tool_running": "KIKI führt eine Aufgabe aus …",
+                    "needs_confirmation": "KIKI wartet auf deine Bestätigung.",
+                    "cancelled": "KIKI wurde abgebrochen.",
+                    "failed": "KIKI konnte die Aufgabe nicht ausführen.",
+                    "limit_reached": "KIKI hat die Aufgabe aus Sicherheitsgründen beendet.",
+                }
+                text = _FALLBACK.get(event.message_code)
+                if text:
+                    self._toast(text)
+        except Exception:
+            log.warning("harness status could not be delivered")
+            self._harness_delivery_failed()
         return False
 
     def _on_harness_answer(self, text: str) -> None:
@@ -327,24 +356,31 @@ class KikiApplication(Adw.Application):
         """Speak one finished answer through the existing one-shot path.
 
         `SpeechDirector.say` is what the greeting, the watcher notices and the
-        voice test already use; `feed`/`flush` belong to a token stream and this
-        is not one.
+        timer notifications use: it routes to the active player, obeys the mute
+        switch and stays out of the token loop.
         """
-        if self._harness is None:
+        if self._harness is None or self._speech is None:
             return False
-        if self._settings.tts_allowed() and self._speech is not None:
+        if not self._settings.tts_allowed():
+            return False
+        try:
             self._speech.say(text)
+        except Exception:
+            log.warning("harness speech could not be delivered")
+            self._harness_delivery_failed()
         return False
 
-    def _on_harness_confirmation(self, request) -> None:
+    def _on_harness_confirmation(self, request: ConfirmationRequest) -> None:
+        session = self._harness
+        if session is not None:
+            session.announce_confirmation(request)
         GLib.idle_add(self._apply_harness_confirmation, request)
 
-    def _apply_harness_confirmation(self, request) -> bool:
-        """Show the proposal on the GTK thread and bind the answer to it."""
+    def _apply_harness_confirmation(self, request: ConfirmationRequest) -> bool:
+        """Show the write confirmation on screen, bound to this exact request."""
         session = self._harness
         if session is None:
             return False
-        session.announce_confirmation(request)
         preview = ActionPreview(
             tool=request.tool_name,
             title="Notiz anlegen",
@@ -370,6 +406,8 @@ class KikiApplication(Adw.Application):
         session, self._harness = self._harness, None
         if session is not None:
             session.shutdown()
+        if self._chat is not None and hasattr(self._chat, "clear_harness_status"):
+            self._chat.clear_harness_status()
 
     def _build_voice_controller(self):
         """The opt-in route, built only when the flag asks for it.

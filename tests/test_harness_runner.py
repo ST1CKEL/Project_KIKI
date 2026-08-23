@@ -395,3 +395,32 @@ def test_an_invalid_model_action_never_reaches_a_tool(tmp_path) -> None:
     assert run.status is RunStatus.FAILED
     assert run.error_code == "model_protocol_error"
     assert ran == []
+
+
+def test_begin_and_drive_lifecycle(tmp_path) -> None:
+    runner = _runner(FinalOnlyModel("Alles gut"), tmp_path)
+    assert runner.busy is False
+    assert runner.active_run_id is None
+
+    run = runner.begin("Status bitte")
+    assert runner.busy is True
+    assert runner.active_run_id == run.id
+    assert run.user_text == "Status bitte"
+
+    # Second begin while busy is refused
+    with pytest.raises(RunBusyError):
+        runner.begin("Zweiter Versuch")
+
+    result = asyncio.run(runner.drive(run))
+    assert result is run
+    assert result.status is RunStatus.COMPLETED
+    assert result.final_text == "Alles gut"
+    assert runner.busy is False
+    assert runner.active_run_id is None
+
+
+def test_drive_with_wrong_or_unbegun_run_is_refused(tmp_path) -> None:
+    runner = _runner(FinalOnlyModel(), tmp_path)
+    unrelated_run = AgentRun(user_text="fremd")
+    with pytest.raises(RuntimeError):
+        asyncio.run(runner.drive(unrelated_run))

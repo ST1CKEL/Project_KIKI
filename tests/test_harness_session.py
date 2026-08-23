@@ -8,20 +8,17 @@ sees, what KIKI says, and above all what does and does not get written.
 from __future__ import annotations
 
 import asyncio
+import inspect
+from typing import Any
 
 import pytest
 
 from kiki.harness.confirmation import ConfirmationRequest
-from kiki.harness.models import ActionKind, ModelAction, RunStatus
+from kiki.harness.models import ActionKind, HarnessStatusEvent, ModelAction, RunStatus
 from kiki.harness.notes import CreateNoteTool, NotesWorkspace
 from kiki.harness.runner import AgentRunner, RunBusyError
 from kiki.harness.session import (
     SPEECH_NEEDS_CONFIRMATION,
-    STATUS_CANCELLED,
-    STATUS_DONE,
-    STATUS_FAILED,
-    STATUS_NEEDS_CONFIRMATION,
-    STATUS_WORKING,
     HarnessSession,
     SessionCallbacks,
 )
@@ -49,7 +46,7 @@ class Recorder:
     """Stands in for the UI and the voice path."""
 
     def __init__(self) -> None:
-        self.status: list[str] = []
+        self.status: list[HarnessStatusEvent] = []
         self.answers: list[str] = []
         self.spoken: list[str] = []
         self.confirmations: list[ConfirmationRequest] = []
@@ -61,6 +58,10 @@ class Recorder:
             on_confirmation=self.confirmations.append,
             on_speak=self.spoken.append,
         )
+
+    @property
+    def status_codes(self) -> list[str]:
+        return [event.message_code for event in self.status]
 
 
 def _build(tmp_path, actions, *, auto=None):
@@ -111,7 +112,8 @@ def test_a_direct_answer_reaches_ui_and_voice_once(tmp_path) -> None:
     run = asyncio.run(session.ask("Wie geht es dir?"))
 
     assert run.status is RunStatus.COMPLETED
-    assert recorder.status == [STATUS_WORKING, STATUS_DONE]
+    assert recorder.status_codes == ["working", "completed"]
+    assert all(event.run_id == run.id for event in recorder.status)
     assert recorder.answers == ["Mir geht es gut."]
     assert recorder.spoken == ["Mir geht es gut."]
     assert _notes(workspace) == []
@@ -147,8 +149,9 @@ def test_an_approved_note_is_written_exactly_once(tmp_path) -> None:
     assert run.status is RunStatus.COMPLETED
     assert _notes(workspace) == ["milch-kaufen.md"]
     assert (workspace.root / "milch-kaufen.md").read_text(encoding="utf-8") == "Milch kaufen"
-    assert STATUS_NEEDS_CONFIRMATION in recorder.status
-    assert recorder.status[-1] == STATUS_DONE
+    assert "needs_confirmation" in recorder.status_codes
+    assert recorder.status[-1].message_code == "completed"
+    assert all(event.run_id == run.id for event in recorder.status)
     assert recorder.spoken == [SPEECH_NEEDS_CONFIRMATION, "Die Notiz ist angelegt."]
 
 
@@ -179,7 +182,8 @@ def test_a_rejected_note_is_never_written_and_no_success_is_spoken(tmp_path) -> 
     assert run.status is RunStatus.FAILED
     assert run.error_code == "confirmation_rejected"
     assert _notes(workspace) == []
-    assert recorder.status[-1] == STATUS_CANCELLED
+    assert recorder.status[-1].message_code == "cancelled"
+    assert all(event.run_id == run.id for event in recorder.status)
     assert not any("angelegt" in line for line in recorder.spoken)
 
 
@@ -197,7 +201,8 @@ def test_a_cancel_before_confirmation_writes_nothing(tmp_path) -> None:
 
     assert run.status is RunStatus.CANCELLED
     assert _notes(workspace) == []
-    assert recorder.status[-1] == STATUS_CANCELLED
+    assert recorder.status[-1].message_code == "cancelled"
+    assert all(event.run_id == run.id for event in recorder.status)
     assert recorder.answers == []
     # A cancel says nothing: a spoken "done" after an interruption is the worst
     # possible answer.
@@ -322,7 +327,8 @@ def test_a_note_that_already_exists_fails_without_overwriting(tmp_path) -> None:
     assert run.status is RunStatus.FAILED
     assert run.error_code == "note_exists"
     assert (workspace.root / "milch-kaufen.md").read_text(encoding="utf-8") == "original"
-    assert recorder.status[-1] == STATUS_FAILED
+    assert recorder.status[-1].message_code == "failed"
+    assert all(event.run_id == run.id for event in recorder.status)
     assert recorder.answers == ["Eine Notiz mit diesem Namen gibt es schon."]
 
 
@@ -368,7 +374,7 @@ def test_nothing_internal_reaches_the_user(tmp_path) -> None:
 
     assert run.status is RunStatus.FAILED
     assert run.error_code == "model_protocol_error"
-    for line in recorder.answers + recorder.spoken + recorder.status:
+    for line in recorder.answers + recorder.spoken + recorder.status_codes:
         assert str(tmp_path) not in line
         assert "Traceback" not in line
         assert "model_protocol_error" not in line
@@ -434,6 +440,7 @@ class _FakeChat:
     def __init__(self, *, fail: bool = False) -> None:
         self.notes: list[tuple[str, str | None]] = []
         self.toasts: list[str] = []
+        self.statuses: list[dict[str, Any]] = []
         self._fail = fail
 
     def append_note(self, text: str, *, toast: str | None = "…") -> None:
@@ -443,6 +450,16 @@ class _FakeChat:
 
     def show_toast(self, title: str) -> None:
         self.toasts.append(title)
+
+    def set_harness_status(self, *, run_id: str, message_code: str, terminal: bool = False) -> None:
+        if self._fail:
+            raise RuntimeError("/home/martin/chat kaputt")
+        self.statuses.append({"run_id": run_id, "message_code": message_code, "terminal": terminal})
+
+    def clear_harness_status(self, run_id: str | None = None) -> None:
+        if self._fail:
+            raise RuntimeError("/home/martin/chat kaputt")
+        self.statuses.append({"clear": True, "run_id": run_id})
 
 
 class _FakeSpeech:
@@ -548,7 +565,10 @@ def test_every_callback_hops_to_the_gtk_thread(monkeypatch, tmp_path) -> None:
                  "_apply_harness_speak", "_apply_harness_confirmation"):
         setattr(type(stub), name, _app_method(name))
     for name, argument in (
-        ("_on_harness_status", "KIKI arbeitet …"),
+        (
+            "_on_harness_status",
+            HarnessStatusEvent(run_id="run-1", status=RunStatus.RUNNING, message_code="working", terminal=False),
+        ),
         ("_on_harness_answer", "fertig"),
         ("_on_harness_speak", "fertig"),
         ("_on_harness_confirmation", object()),
@@ -620,7 +640,8 @@ def _wired_stub(tmp_path, *, chat=None, speech=None, harness=object()):
     stub._speech = speech
     stub._settings = _TtsOn()
     for name in ("_apply_harness_answer", "_apply_harness_speak",
-                 "_apply_harness_status", "_harness_delivery_failed"):
+                 "_apply_harness_status", "_harness_delivery_failed",
+                 "cancel_harness"):
         setattr(type(stub), name, _app_method(name))
     return stub
 
@@ -762,7 +783,7 @@ def test_a_waiting_proposal_claims_no_success(tmp_path) -> None:
     asyncio.run(session.ask("Lege eine Notiz an."))
 
     assert recorder.spoken == [SPEECH_NEEDS_CONFIRMATION]
-    assert STATUS_NEEDS_CONFIRMATION in recorder.status
+    assert "needs_confirmation" in recorder.status_codes
     assert recorder.answers == []
     assert _notes(workspace) == []
 
@@ -806,9 +827,16 @@ def test_a_delivery_failure_leaves_a_pending_proposal_untouched(tmp_path) -> Non
     assert _notes(workspace) == []
 
 
-@pytest.mark.parametrize(
-    "method", ["_apply_harness_answer", "_apply_harness_speak", "_apply_harness_status"]
-)
+def test_a_late_status_callback_after_shutdown_does_nothing(tmp_path) -> None:
+    chat = _FakeChat()
+    stub = _wired_stub(tmp_path, chat=chat, harness=None)
+    event = HarnessStatusEvent(run_id="run-1", status=RunStatus.RUNNING, message_code="working", terminal=False)
+    _app_method("_apply_harness_status")(stub, event)
+    assert chat.statuses == []
+    assert stub.toasts == []
+
+
+@pytest.mark.parametrize("method", ["_apply_harness_answer", "_apply_harness_speak"])
 def test_a_late_callback_after_shutdown_does_nothing(tmp_path, method) -> None:
     """Callbacks already sitting in the idle queue when the app closed."""
     chat = _FakeChat()
@@ -843,3 +871,541 @@ def test_the_chat_window_never_speaks_by_itself() -> None:
     ).read_text(encoding="utf-8")
     for forbidden in ("SpeechDirector", "_speech", "say("):
         assert forbidden not in source, forbidden
+
+
+# --- Slice 2: Visible run status and cancel ---------------------------------
+
+
+class _FakeWidget:
+    def __init__(self) -> None:
+        self.visible = False
+        self.sensitive = True
+        self.text = ""
+        self.label = ""
+        self.spinning = False
+
+    def set_visible(self, visible: bool) -> None:
+        self.visible = bool(visible)
+
+    def get_visible(self) -> bool:
+        return self.visible
+
+    def set_sensitive(self, sensitive: bool) -> None:
+        self.sensitive = bool(sensitive)
+
+    def set_text(self, text: str) -> None:
+        self.text = str(text)
+
+    def set_label(self, label: str) -> None:
+        self.label = str(label)
+
+    def start(self) -> None:
+        self.spinning = True
+
+    def stop(self) -> None:
+        self.spinning = False
+
+
+class _ChatWindowDouble:
+    def __init__(self) -> None:
+        self._harness_bar = _FakeWidget()
+        self._harness_spinner = _FakeWidget()
+        self._harness_label = _FakeWidget()
+        self._harness_cancel_btn = _FakeWidget()
+        self._harness_run_id = None
+        self.cancelled_run_ids: list[str | None] = []
+
+    def clear_harness_status(self, run_id: str | None = None) -> None:
+        from kiki.ui.chat_window import ChatWindow
+
+        ChatWindow.clear_harness_status(self, run_id=run_id)
+
+    def get_application(self):
+        double = self
+
+        class _App:
+            def cancel_harness(self, run_id=None):
+                double.cancelled_run_ids.append(run_id)
+                return True
+
+        return _App()
+
+
+def test_initial_state_has_no_visible_harness_status() -> None:
+    double = _ChatWindowDouble()
+    assert double._harness_bar.visible is False
+    assert double._harness_label.text == ""
+    assert double._harness_run_id is None
+
+
+def test_running_status_displays_working_spinner_and_cancel_button() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-A", message_code="working", terminal=False)
+
+    assert double._harness_bar.visible is True
+    assert double._harness_label.text == "KIKI arbeitet …"
+    assert double._harness_spinner.spinning is True
+    assert double._harness_cancel_btn.visible is True
+    assert double._harness_cancel_btn.sensitive is True
+    assert double._harness_cancel_btn.label == "Abbrechen"
+    assert double._harness_run_id == "run-A"
+
+
+def test_tool_running_status_displays_safe_tool_indicator() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-A", message_code="tool_running", terminal=False)
+
+    assert double._harness_bar.visible is True
+    assert double._harness_label.text == "KIKI führt eine Aufgabe aus …"
+    assert double._harness_spinner.spinning is True
+    assert double._harness_cancel_btn.sensitive is True
+
+
+def test_needs_confirmation_shows_waiting_status_and_active_cancel() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-A", message_code="needs_confirmation", terminal=False)
+
+    assert double._harness_bar.visible is True
+    assert double._harness_label.text == "KIKI wartet auf deine Bestätigung."
+    assert double._harness_spinner.spinning is False
+    assert double._harness_cancel_btn.visible is True
+    assert double._harness_cancel_btn.sensitive is True
+
+
+def test_completed_from_a_closes_only_status_of_a() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-B", message_code="working", terminal=False)
+    assert double._harness_bar.visible is True
+    assert double._harness_run_id == "run-B"
+
+    # Completed from old run A does not close run B
+    ChatWindow.set_harness_status(double, run_id="run-A", message_code="completed", terminal=True)
+    assert double._harness_bar.visible is True
+    assert double._harness_run_id == "run-B"
+    assert double._harness_label.text == "KIKI arbeitet …"
+
+    # Completed from matching run B closes
+    ChatWindow.set_harness_status(double, run_id="run-B", message_code="completed", terminal=True)
+    assert double._harness_bar.visible is False
+    assert double._harness_spinner.spinning is False
+    assert double._harness_run_id is None
+
+
+def test_terminal_cancelled_failed_limit_from_a_does_not_change_b() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-B", message_code="working", terminal=False)
+
+    for code in ("cancelled", "failed", "limit_reached"):
+        ChatWindow.set_harness_status(double, run_id="run-A", message_code=code, terminal=True)
+        assert double._harness_run_id == "run-B"
+        assert double._harness_label.text == "KIKI arbeitet …"
+        assert double._harness_spinner.spinning is True
+        assert double._harness_cancel_btn.sensitive is True
+
+
+def test_late_running_from_a_does_not_change_b() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-B", message_code="working", terminal=False)
+
+    ChatWindow.set_harness_status(double, run_id="run-A", message_code="working", terminal=False)
+    assert double._harness_run_id == "run-B"
+    assert double._harness_label.text == "KIKI arbeitet …"
+
+
+def test_cancelled_status_shows_cancellation_and_disables_cancel_button() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-1", message_code="cancelled", terminal=True)
+
+    assert double._harness_bar.visible is True
+    assert double._harness_label.text == "KIKI wurde abgebrochen."
+    assert double._harness_spinner.spinning is False
+    assert double._harness_cancel_btn.sensitive is False
+
+
+def test_failed_and_limit_reached_show_sanitized_categories() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-1", message_code="failed", terminal=True)
+    assert double._harness_bar.visible is True
+    assert double._harness_label.text == "KIKI konnte die Aufgabe nicht ausführen."
+    assert double._harness_cancel_btn.sensitive is False
+
+    ChatWindow.set_harness_status(double, run_id="run-1", message_code="limit_reached", terminal=True)
+    assert double._harness_bar.visible is True
+    assert double._harness_label.text == "KIKI hat die Aufgabe aus Sicherheitsgründen beendet."
+    assert double._harness_cancel_btn.sensitive is False
+
+
+def test_status_display_leaks_no_private_or_internal_details() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    for code in ("working", "tool_running", "needs_confirmation", "cancelled", "failed", "limit_reached"):
+        ChatWindow.set_harness_status(
+            double,
+            run_id="run-1",
+            message_code=code,
+            terminal=code in {"cancelled", "failed", "limit_reached"},
+        )
+        text = double._harness_label.text
+        assert "/home/" not in text
+        assert "Traceback" not in text
+        assert "Token" not in text
+        assert "prompt" not in text.lower()
+
+
+def test_cancel_button_click_invokes_application_cancel_with_bound_run_id() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-test-42", message_code="working", terminal=False)
+
+    ChatWindow._on_cancel_harness_clicked(double)
+
+    assert double.cancelled_run_ids == ["run-test-42"]
+    assert double._harness_cancel_btn.sensitive is False
+    assert double._harness_cancel_btn.label == "Abbruch angefordert …"
+
+
+def test_cancel_click_from_a_does_not_cancel_b(tmp_path) -> None:
+    class _Session:
+        def __init__(self, active_id):
+            self.active_run_id = active_id
+            self.cancelled: list[str] = []
+
+        def cancel(self, run_id=None):
+            if self.active_run_id is None or (run_id is not None and run_id != self.active_run_id):
+                return False
+            self.cancelled.append(self.active_run_id)
+            return True
+
+    session = _Session("run-B")
+    stub = _wired_stub(tmp_path, harness=session)
+
+    # Cancel click targeting old run-A returns False and leaves run-B untouched
+    assert _app_method("cancel_harness")(stub, run_id="run-A") is False
+    assert session.cancelled == []
+
+
+def test_cancel_button_double_click_is_idempotent() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    ChatWindow.set_harness_status(double, run_id="run-test-42", message_code="working", terminal=False)
+
+    ChatWindow._on_cancel_harness_clicked(double)
+    assert double._harness_cancel_btn.sensitive is False
+    ChatWindow._on_cancel_harness_clicked(double)
+    assert double.cancelled_run_ids == ["run-test-42", "run-test-42"]
+
+
+def test_cancel_button_with_no_active_run_id_does_not_invoke_cancel_harness() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    double = _ChatWindowDouble()
+    assert double._harness_run_id is None
+
+    ChatWindow._on_cancel_harness_clicked(double)
+
+    assert double.cancelled_run_ids == []
+    assert double._harness_cancel_btn.sensitive is True
+
+
+def test_application_does_not_read_active_run_id_in_status_path() -> None:
+    from kiki.application import KikiApplication
+
+    source = inspect.getsource(KikiApplication._on_harness_status)
+    assert "active_run_id" not in source
+    source_apply = inspect.getsource(KikiApplication._apply_harness_status)
+    assert "active_run_id" not in source_apply
+
+
+def test_application_forwards_harness_status_event_to_chat_window(tmp_path) -> None:
+    chat = _FakeChat()
+    stub = _wired_stub(tmp_path, chat=chat, harness=object())
+    event = HarnessStatusEvent(run_id="run-99", status=RunStatus.RUNNING, message_code="working", terminal=False)
+
+    _app_method("_apply_harness_status")(stub, event)
+
+    assert chat.statuses == [{"run_id": "run-99", "message_code": "working", "terminal": False}]
+
+
+def test_completed_without_chat_produces_no_duplicate_toast_and_only_answer_is_delivered(tmp_path) -> None:
+    stub = _wired_stub(tmp_path, chat=None, harness=object())
+    event = HarnessStatusEvent(run_id="run-1", status=RunStatus.COMPLETED, message_code="completed", terminal=True)
+
+    _app_method("_apply_harness_status")(stub, event)
+    assert stub.toasts == []
+
+    _app_method("_apply_harness_answer")(stub, "Endgültige Antwort.")
+    assert stub.toasts == ["Endgültige Antwort."]
+
+
+def test_application_answer_does_not_clear_harness_status_unbound(tmp_path) -> None:
+    chat = _FakeChat()
+    stub = _wired_stub(tmp_path, chat=chat)
+
+    _app_method("_apply_harness_answer")(stub, "Hier ist die Antwort.")
+
+    assert chat.notes == [("Hier ist die Antwort.", None)]
+    assert chat.statuses == []
+
+
+def test_application_cancel_harness_respects_run_id_guard(tmp_path) -> None:
+    class _Session:
+        def __init__(self, active_id):
+            self.active_run_id = active_id
+            self.cancelled: list[str] = []
+
+        def cancel(self, run_id=None):
+            if self.active_run_id is None:
+                return False
+            if run_id is not None and run_id != self.active_run_id:
+                return False
+            self.cancelled.append(self.active_run_id)
+            return True
+
+    session = _Session("run-current")
+    stub = _wired_stub(tmp_path, harness=session)
+
+    # Cancel with wrong run_id is refused
+    assert _app_method("cancel_harness")(stub, run_id="run-old") is False
+    assert session.cancelled == []
+
+    # Cancel with matching run_id succeeds
+    assert _app_method("cancel_harness")(stub, run_id="run-current") is True
+    assert session.cancelled == ["run-current"]
+
+    # Cancel with None cancels active run
+    assert _app_method("cancel_harness")(stub, run_id=None) is True
+    assert session.cancelled == ["run-current", "run-current"]
+
+
+def test_session_cancel_run_id_binding(tmp_path) -> None:
+    session, runner, _recorder, _workspace = _build(
+        tmp_path, [ModelAction.answer("fertig")]
+    )
+    # No active run -> False
+    assert session.cancel() is False
+    assert session.cancel("run-xyz") is False
+
+    run = runner.begin("Aufgabe")
+    assert session.active_run_id == run.id
+
+    # Wrong run_id -> False, run stays active
+    assert session.cancel("run-wrong") is False
+    assert session.active_run_id == run.id
+
+    # Matching run_id -> True
+    assert session.cancel(run.id) is True
+
+    # Complete run
+    asyncio.run(runner.drive(run))
+    assert session.active_run_id is None
+
+    # After terminal -> False
+    assert session.cancel(run.id) is False
+    assert session.cancel() is False
+
+
+def test_application_has_no_private_runner_access() -> None:
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src" / "kiki" / "application.py"
+    ).read_text(encoding="utf-8")
+    assert "_runner" not in source
+
+
+def test_cancel_during_confirmation_writes_nothing_and_allows_new_run(tmp_path) -> None:
+    session, _runner, recorder, workspace = _build(
+        tmp_path, [ModelAction.call("create_note", NOTE_ARGS)],
+        auto=lambda session, _request: session.cancel(),
+    )
+    run1 = asyncio.run(session.ask("Lege eine Notiz an."))
+    assert run1.status is RunStatus.CANCELLED
+    assert _notes(workspace) == []
+
+    # New run afterwards works
+    session._runner._adapter = ScriptedModel([ModelAction.answer("Zweiter Versuch")])
+    run2 = asyncio.run(session.ask("Zweiter Versuch"))
+    assert run2.status is RunStatus.COMPLETED
+    assert recorder.answers == ["Zweiter Versuch"]
+
+
+# --- Slice 2A: Structured run-bound status events --------------------------
+
+
+def test_harness_status_event_validation() -> None:
+    # Valid
+    event = HarnessStatusEvent(
+        run_id="run-1",
+        status=RunStatus.RUNNING,
+        message_code="working",
+        terminal=False,
+    )
+    assert event.run_id == "run-1"
+    assert event.status is RunStatus.RUNNING
+    assert event.message_code == "working"
+    assert event.terminal is False
+
+    # Empty run_id rejected
+    with pytest.raises(ValueError, match="run_id"):
+        HarnessStatusEvent(
+            run_id="   ",
+            status=RunStatus.RUNNING,
+            message_code="working",
+            terminal=False,
+        )
+
+    # Invalid status rejected
+    with pytest.raises(ValueError, match="ungültiger RunStatus"):
+        HarnessStatusEvent(
+            run_id="run-1",
+            status="invalid",  # type: ignore[arg-type]
+            message_code="working",
+            terminal=False,
+        )
+
+    # Unknown message_code rejected
+    with pytest.raises(ValueError, match="unbekannter message_code"):
+        HarnessStatusEvent(
+            run_id="run-1",
+            status=RunStatus.RUNNING,
+            message_code="custom_code",
+            terminal=False,
+        )
+
+    # Terminal mismatch rejected
+    with pytest.raises(ValueError, match="terminal"):
+        HarnessStatusEvent(
+            run_id="run-1",
+            status=RunStatus.COMPLETED,
+            message_code="completed",
+            terminal=False,  # COMPLETED is terminal!
+        )
+
+
+def test_working_and_terminal_carry_exact_same_run_id(tmp_path) -> None:
+    session, _runner, recorder, _workspace = _build(
+        tmp_path, [ModelAction.answer("Ergebnis")]
+    )
+    run = asyncio.run(session.ask("Berechne etwas."))
+
+    assert run.status is RunStatus.COMPLETED
+    assert len(recorder.status) == 2
+    working, completed = recorder.status
+    assert working.run_id == run.id
+    assert working.status is RunStatus.RUNNING
+    assert working.message_code == "working"
+    assert working.terminal is False
+
+    assert completed.run_id == run.id
+    assert completed.status is RunStatus.COMPLETED
+    assert completed.message_code == "completed"
+    assert completed.terminal is True
+
+
+def test_needs_confirmation_and_request_carry_exact_same_run_id(tmp_path) -> None:
+    session, _runner, recorder, _workspace = _build(
+        tmp_path, [ModelAction.call("create_note", NOTE_ARGS), ModelAction.answer("fertig")],
+        auto=_approve,
+    )
+    run = asyncio.run(session.ask("Notiz erstellen."))
+
+    assert run.status is RunStatus.COMPLETED
+    req = recorder.confirmations[0]
+    assert req.run_id == run.id
+
+    conf_events = [e for e in recorder.status if e.message_code == "needs_confirmation"]
+    assert len(conf_events) == 1
+    assert conf_events[0].run_id == run.id
+    assert conf_events[0].status is RunStatus.NEEDS_CONFIRMATION
+    assert conf_events[0].terminal is False
+
+
+def test_error_status_event_lifecycle(tmp_path) -> None:
+    session, _runner, recorder, _workspace = _build(
+        tmp_path, [ModelAction(ActionKind.FINAL)]  # invalid
+    )
+    run = asyncio.run(session.ask("Ungültige Aktion."))
+
+    assert run.status is RunStatus.FAILED
+    assert [e.message_code for e in recorder.status] == ["working", "failed"]
+    assert all(e.run_id == run.id for e in recorder.status)
+    assert recorder.status[-1].terminal is True
+
+
+def test_limit_reached_status_event_lifecycle(tmp_path) -> None:
+    from tests.agent_fakes import RepeatedToolModel
+
+    registry = ToolRegistry()
+    registry.register(SystemStatusTool(uptime=lambda: 5.0))
+    recorder = Recorder()
+    runner = AgentRunner(
+        RepeatedToolModel(),
+        registry,
+        trace_dir=tmp_path / "traces",
+        max_tool_calls=2,
+    )
+    session = HarnessSession(runner, recorder.callbacks())
+    run = asyncio.run(session.ask("Endlosschleife bitte."))
+
+    assert run.status is RunStatus.LIMIT_REACHED
+    assert [e.message_code for e in recorder.status] == ["working", "limit_reached"]
+    assert all(e.run_id == run.id for e in recorder.status)
+    assert recorder.status[-1].terminal is True
+
+
+def test_parallel_busy_start_emits_no_event_and_keeps_first_run(tmp_path) -> None:
+    session, runner, recorder, _workspace = _build(
+        tmp_path, [ModelAction.answer("fertig")]
+    )
+    run1 = runner.begin("Erster Task")
+    recorder.status.append(
+        HarnessStatusEvent(run_id=run1.id, status=RunStatus.RUNNING, message_code="working", terminal=False)
+    )
+
+    # Parallel ask is refused immediately
+    with pytest.raises(RunBusyError):
+        asyncio.run(session.ask("Zweiter Task"))
+
+    # No event for second task was emitted
+    assert len(recorder.status) == 1
+    assert recorder.status[0].run_id == run1.id
+
+    # Finish run1 cleanly
+    result = asyncio.run(runner.drive(run1))
+    assert result.status is RunStatus.COMPLETED
+
+
+def test_new_run_after_terminal_gets_distinct_run_id(tmp_path) -> None:
+    session, _runner, recorder, _workspace = _build(
+        tmp_path, [ModelAction.answer("Antwort 1"), ModelAction.answer("Antwort 2")]
+    )
+    run1 = asyncio.run(session.ask("Task 1"))
+    run2 = asyncio.run(session.ask("Task 2"))
+
+    assert run1.id != run2.id
+    events_run1 = [e for e in recorder.status if e.run_id == run1.id]
+    events_run2 = [e for e in recorder.status if e.run_id == run2.id]
+
+    assert len(events_run1) == 2
+    assert [e.message_code for e in events_run1] == ["working", "completed"]
+    assert len(events_run2) == 2
+    assert [e.message_code for e in events_run2] == ["working", "completed"]

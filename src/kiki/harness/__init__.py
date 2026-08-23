@@ -18,9 +18,11 @@ from kiki.harness.confirmation import (
 )
 from kiki.harness.models import (
     ERROR_CODES,
+    HARNESS_MESSAGE_CODES,
     ActionKind,
     AgentRun,
     CancelToken,
+    HarnessStatusEvent,
     ModelAction,
     RunStatus,
     ToolCall,
@@ -36,10 +38,12 @@ from kiki.harness.trace import TraceRecorder, TraceWriteError
 
 __all__ = [
     "ERROR_CODES",
+    "HARNESS_MESSAGE_CODES",
     "ConfirmationError",
     "ConfirmationRequest",
     "CreateNoteTool",
     "HarnessSession",
+    "HarnessStatusEvent",
     "NotesWorkspace",
     "PendingConfirmation",
     "SessionCallbacks",

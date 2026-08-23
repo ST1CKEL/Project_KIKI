@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from kiki.harness.confirmation import ConfirmationError, ConfirmationRequest
-from kiki.harness.models import AgentRun, RunStatus
+from kiki.harness.models import AgentRun, HarnessStatusEvent, RunStatus
 from kiki.harness.runner import AgentRunner, RunBusyError
 
 log = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ _FAILURE_TEXT: dict[str, str] = {
 class SessionCallbacks:
     """Everything that leaves the harness. All optional, all sanitised."""
 
-    on_status: Callable[[str], None] | None = None
+    on_status: Callable[[HarnessStatusEvent], None] | None = None
     on_answer: Callable[[str], None] | None = None
     on_confirmation: Callable[[ConfirmationRequest], None] | None = None
     on_speak: Callable[[str], None] | None = None
@@ -94,18 +94,19 @@ class HarnessSession:
         """
         if self._closed:
             raise RunBusyError("die Sitzung ist beendet")
-        self._emit_status(STATUS_WORKING)
+        run = self._runner.begin(user_text)
+        self._emit_status(run.id, RunStatus.RUNNING, "working")
         try:
-            run = await self._runner.run(user_text)
+            finished = await self._runner.drive(run)
         except RunBusyError:
             raise
         except Exception:
             log.warning("harness run crashed", exc_info=False)
-            self._emit_status(STATUS_FAILED)
+            self._emit_status(run.id, RunStatus.FAILED, "failed")
             self._speak(SPEECH_FAILED)
             raise
-        self._deliver(run)
-        return run
+        self._deliver(finished)
+        return finished
 
     def start(self, user_text: str) -> asyncio.Task[AgentRun]:
         """Fire and forget, for a caller that must not block."""
@@ -120,7 +121,7 @@ class HarnessSession:
         except ConfirmationError as exc:
             log.info("confirmation refused: %s", exc.code)
             return False
-        self._emit_status(STATUS_WORKING)
+        self._emit_status(run_id, RunStatus.RUNNING, "working")
         return True
 
     def reject(self, run_id: str, call_id: str) -> bool:
@@ -131,11 +132,19 @@ class HarnessSession:
             return False
         return True
 
-    def cancel(self) -> bool:
-        run_id = self._runner.active_run_id
-        if run_id is None:
+    @property
+    def active_run_id(self) -> str | None:
+        """The id of the currently executing run, or None if idle."""
+        return self._runner.active_run_id
+
+    def cancel(self, run_id: str | None = None) -> bool:
+        """Cancel the active run. If `run_id` is given, it must match."""
+        active_id = self._runner.active_run_id
+        if active_id is None:
             return False
-        return self._runner.cancel(run_id)
+        if run_id is not None and run_id != active_id:
+            return False
+        return self._runner.cancel(active_id)
 
     def shutdown(self) -> None:
         """Window closing or app quitting: nothing pending may still be written."""
@@ -148,26 +157,33 @@ class HarnessSession:
     def _deliver(self, run: AgentRun) -> None:
         if run.status is RunStatus.COMPLETED:
             text = (run.final_text or "").strip()
-            self._emit_status(STATUS_DONE)
+            self._emit_status(run.id, RunStatus.COMPLETED, "completed")
             self._emit_answer(text)
             self._speak(text)
             return
         if run.status is RunStatus.CANCELLED:
             # Nothing is spoken: a cancel is what the user asked for, and a
             # spoken "done" after an interruption is the worst possible answer.
-            self._emit_status(STATUS_CANCELLED)
+            self._emit_status(run.id, RunStatus.CANCELLED, "cancelled")
+            return
+        if run.status is RunStatus.LIMIT_REACHED:
+            self._emit_status(run.id, RunStatus.LIMIT_REACHED, "limit_reached")
+            self._emit_answer("Das wurde mir zu verschachtelt.")
+            self._speak("Das wurde mir zu verschachtelt.")
             return
         code = run.error_code or "tool_failed"
         line = _FAILURE_TEXT.get(code, SPEECH_FAILED)
         self._emit_status(
-            STATUS_CANCELLED if code == "confirmation_rejected" else STATUS_FAILED
+            run.id,
+            RunStatus.CANCELLED if code == "confirmation_rejected" else RunStatus.FAILED,
+            "cancelled" if code == "confirmation_rejected" else "failed",
         )
         self._emit_answer(line)
         self._speak(line)
 
     def announce_confirmation(self, request: ConfirmationRequest) -> None:
         """Called by the runner when a write is waiting for a person."""
-        self._emit_status(STATUS_NEEDS_CONFIRMATION)
+        self._emit_status(request.run_id, RunStatus.NEEDS_CONFIRMATION, "needs_confirmation")
         callback = self._callbacks.on_confirmation
         if callback is not None:
             try:
@@ -176,8 +192,21 @@ class HarnessSession:
                 log.debug("confirmation presentation failed", exc_info=True)
         self._speak(SPEECH_NEEDS_CONFIRMATION)
 
-    def _emit_status(self, text: str) -> None:
-        _safely(self._callbacks.on_status, text)
+    def _emit_status(
+        self,
+        run_id: str,
+        status: RunStatus,
+        message_code: str,
+        *,
+        terminal: bool | None = None,
+    ) -> None:
+        event = HarnessStatusEvent(
+            run_id=run_id,
+            status=status,
+            message_code=message_code,
+            terminal=status.is_terminal if terminal is None else terminal,
+        )
+        _safely(self._callbacks.on_status, event)
 
     def _emit_answer(self, text: str) -> None:
         if text:
@@ -188,11 +217,11 @@ class HarnessSession:
             _safely(self._callbacks.on_speak, text)
 
 
-def _safely(callback: Callable[[str], None] | None, text: str) -> None:
+def _safely(callback: Callable[[Any], None] | None, payload: Any) -> None:
     if callback is None:
         return
     try:
-        callback(text)
+        callback(payload)
     except Exception:
         # A listener that throws must not take the run down with it.
         log.debug("session listener failed", exc_info=True)
