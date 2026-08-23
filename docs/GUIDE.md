@@ -76,6 +76,50 @@ Das Chatfenster bietet eine moderne Benutzeroberfläche auf Basis von GTK4 und L
 
 ---
 
+## 2.1 Agentic Desktop-Assistenz mit `/agent`
+
+Neben normalen Chatgesprächen kannst du KIKI mit dem Präfix `/agent` direkte, kontrollierte Aufgaben zur Ausführung übergeben:
+
+```text
+/agent Erstelle eine Notiz mit dem Text "Einkaufsliste: Milch, Brot, Äpfel".
+/agent Wie ist dein aktueller Status?
+```
+
+<div align="center">
+
+```
+┌────────────────────────────────────────────────────────┐
+│ 💬 KIKI Chat                             [—] [□] [✕] │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│  [Du]: /agent Erstelle eine Notiz mit dem Text "..."   │
+│                                                        │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ ⚙️ KIKI arbeitet …                   [Abbrechen] │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+├────────────────────────────────────────────────────────┤
+```
+
+</div>
+
+### Lebenszyklus eines Agent-Runs:
+
+1. **Start:** KIKI initialisiert einen neuen isolierten Lauf mit eindeutiger `run_id`.
+2. **Statusanzeige:** Ein Spinner und ein sprechendes Label informieren dich live:
+   - `KIKI arbeitet …`
+   - `KIKI führt eine Aufgabe aus …`
+   - `KIKI wartet auf deine Bestätigung.`
+3. **Abbrechen:** Ein Klick auf **`[Abbrechen]`** stoppt den Lauf sofort; verwaiste Aktionen werden nicht mehr ausgeführt.
+4. **Bestätigungsdialog bei schreibenden Aktionen:**
+   - Möchte KIKI eine Notiz anlegen (`create_note`), öffnet sich ein nativer Bestätigungsdialog.
+   - Der Dialog zeigt Titel und Inhalt der geplanten Notiz.
+   - Erst nach Klick auf **„Bestätigen“** wird die Notiz unter `~/.local/share/kiki/notes/` gespeichert.
+   - Klickst du auf **„Abbrechen“**, wird der Vorgang ohne Seiteneffekte verworfen.
+5. **Ergebnis:** Nach Abschluss wird der Statusbalken sauber ausgeblendet und KIKI liefert die formatierte Antwort im Chat.
+
+---
+
 ## 3. Vision & Bildschirmfreigabe
 
 KIKI kann Bilder und Bildschirmfotos analysieren, um dir bei visuellen Aufgaben, Fehlermeldungen oder Code auf dem Bildschirm zu helfen.

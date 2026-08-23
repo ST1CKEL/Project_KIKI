@@ -6,7 +6,7 @@ KIKI ist eine **GTK4/libadwaita-Anwendung** mit einem **GI-freien Kern**. Die Fi
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  GTK4 / libadwaita  (Pet, Chat, PC-Control, Confirm)     │
+│  GTK4 / libadwaita  (Pet, Chat, Statusbar, ConfirmModal) │
 │  Keine Business-Logik in Callbacks — nur Darstellung     │
 │  Kein PyTorch / kein CUDA im GUI-Prozess                 │
 └────────────┬─────────────────────────────┬───────────────┘
@@ -19,7 +19,8 @@ KIKI ist eine **GTK4/libadwaita-Anwendung** mit einem **GI-freien Kern**. Die Fi
            ▼                                 │
 ┌────────────────────────────────────────────┴────────────┐
 │ ChatService  · CharacterStateMachine  · SpeechDirector  │
-│ LLMProvider  · ChatRepository         · ToolExecutor    │
+│ HarnessSession (AgentRunner, Tools)   · ToolExecutor    │
+│ LLMProvider  · ChatRepository         · NotesWorkspace  │
 └────────┬──────────────┬──────────────────┬──────────────┘
          ▼              ▼                  ▼
    Ollama            Qwen3-TTS-Dienst    PipeWire

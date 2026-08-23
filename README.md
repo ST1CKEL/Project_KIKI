@@ -68,57 +68,97 @@ KIKI verfügt über zwei kuratierte Design-Packs mit jeweils 12 handgezeichneten
 
 ### Emotionen & Animations-Zustände
 
-KIKI reagiert visuell auf den Systemzustand und das Gespräch:
+KIKI reagiert visuell in Echtzeit auf das Gespräch, Systemzustände und Agent-Aktionen. Alle Sprites sind hochauflösend (512×512) auf transparentem Canvas normalisiert:
 
-| Idle (Warten) | Happy (Freude) | Thinking (Nachdenken) | Speaking (Sprechen) |
+| **Idle** (Warten) | **Happy** (Freude) | **Thinking** (Nachdenken) | **Speaking** (Sprechen) |
 |:---:|:---:|:---:|:---:|
-| <img src="data/character/kiki-adult-v3/idle/00.png" width="130" /> | <img src="data/character/kiki-adult-v3/happy/00.png" width="130" /> | <img src="data/character/kiki-adult-v3/thinking/00.png" width="130" /> | <img src="data/character/kiki-adult-v3/speaking/00.png" width="130" /> |
-| **Listening (Zuhören)** | **Sleeping (Schlafmodus)** | **Surprised (Überrascht)** | **Error (Fehler)** |
-| <img src="data/character/kiki-adult-v3/listening/00.png" width="130" /> | <img src="data/character/kiki-adult-v3/sleeping/00.png" width="130" /> | <img src="data/character/kiki-adult-v3/surprised/00.png" width="130" /> | <img src="data/character/kiki-adult-v3/error/00.png" width="130" /> |
+| <img src="data/character/kiki-adult-v3/idle/00.png" width="130" alt="Idle" /> | <img src="data/character/kiki-adult-v3/happy/00.png" width="130" alt="Happy" /> | <img src="data/character/kiki-adult-v3/thinking/00.png" width="130" alt="Thinking" /> | <img src="data/character/kiki-adult-v3/speaking/00.png" width="130" alt="Speaking" /> |
+| **Listening** (Zuhören) | **Sleeping** (Schlafmodus) | **Surprised** (Überrascht) | **Error** (Fehler / Not-Aus) |
+| <img src="data/character/kiki-adult-v3/listening/00.png" width="130" alt="Listening" /> | <img src="data/character/kiki-adult-v3/sleeping/00.png" width="130" alt="Sleeping" /> | <img src="data/character/kiki-adult-v3/surprised/00.png" width="130" alt="Surprised" /> | <img src="data/character/kiki-adult-v3/error/00.png" width="130" alt="Error" /> |
+| **Greeting** (Begrüßung) | **Notification** (Hinweis) | **Idle Blink** (Blinzeln) | **Status / Working** (Aktiv) |
+| <img src="data/character/kiki-adult-v3/greet/00.png" width="130" alt="Greeting" /> | <img src="data/character/kiki-adult-v3/notification/00.png" width="130" alt="Notification" /> | <img src="data/character/kiki-adult-v3/idle_blink/00.png" width="130" alt="Idle Blink" /> | <img src="data/character/kiki-adult-v3/happy/00.png" width="130" alt="Working" /> |
+
+---
+
+## 🤖 Agentic Desktop-Assistenz (`/agent`)
+
+KIKI verfügt über ein dediziertes **Harness-Subsystem** (`kiki.harness`) für kontrollierte, transparente und nachvollziehbare Agenten-Aufgaben direkt auf deinem Desktop:
+
+```text
+/agent erstelle eine Notiz mit "Projekt-Meilensteine prüfen"
+```
+
+<div align="center">
+
+```
+┌────────────────────────────────────────────────────────┐
+│ ⏳ KIKI arbeitet …                         [Abbrechen] │
+└────────────────────────────────────────────────────────┘
+```
+
+</div>
+
+### Kernfunktionen des Harness:
+1. **Eindeutiges Befehls-Routing:** Eingaben mit `/agent <Aufgabe>` werden strikt isoliert vom regulären Chat an den Agent-Runner übergeben.
+2. **Run-gebundener Statusbalken:** Während der Ausführung erscheint im Chatfenster ein kompakter Statusbalken mit Spinner und **`[Abbrechen]`-Button**.
+3. **Sicherheit & Bestätigungsdialog bei Seiteneffekten:** Schreibende Aktionen (wie `create_note`) verlangen vor dem Schreiben eine interaktive Genehmigung mit Inhaltsvorschau.
+4. **Stabile Run-Identität (`run_id`):** Jeder Agenten-Lauf besitzt eine eindeutige UUID. Verspätete Callbacks oder alte Events können die aktuelle UI-Anzeige nicht verfälschen.
+5. **Revisionssichere Notizenablage:** Notizen werden unter `~/.local/share/kiki/notes/` abgelegt.
 
 ---
 
 ## 🏛 Architektur
 
-Project KIKI trennt die Benutzeroberfläche strikt von der rechenintensiven KI-Logik und den Subprozessen. Dadurch bleibt die GTK4-Oberfläche stets flüssig mit 60 FPS:
+Project KIKI trennt die Benutzeroberfläche strikt von der rechenintensiven KI-Logik, den Hintergrund-Threads und Subprozessen. Dadurch bleibt die GTK4-Oberfläche stets flüssig mit 60 FPS:
 
 ```mermaid
 flowchart TD
     subgraph UI ["GTK4 / Libadwaita Interface (Main Thread)"]
         PetWindow["🐾 Pet Window (Transparent, Wayland)"]
-        ChatWindow["💬 Chat & Vision Window"]
+        ChatWindow["💬 Chat, Statusbar & Cancel"]
         CodeWindow["💻 OpenCode Workspace Manager"]
+        ConfirmDialog["🛡️ Confirmation Modal Dialog"]
         SettingsDialog["⚙️ Preferences Dialog"]
     end
 
-    subgraph Core ["KIKI Core Engine (asyncio)"]
+    subgraph Bridge ["Async / UI Thread Bridge"]
         AsyncBridge["⚡ AsyncBridge (GLib.idle_add)"]
-        EventBus["📢 EventBus (chat.stream, voice, pet)"]
-        ChatService["🧠 ChatService & Persona"]
-        StateMachine["🎭 Character State Machine"]
-        ToolExecutor["🛡️ Tool Policy & Security Sandbox"]
-        SpeechDirector["🎙️ Speech Director (Playback Controller)"]
     end
 
-    subgraph Backends ["Lokale Services & Hardware"]
+    subgraph Core ["KIKI Core Engine (asyncio Thread)"]
+        EventBus["📢 EventBus"]
+        ChatService["🧠 ChatService (Gespräche & Streaming)"]
+        HarnessSession["🤖 HarnessSession (Run-Lifecycle)"]
+        AgentRunner["⚙️ AgentRunner (Step Driver)"]
+        ToolRegistry["🔧 ToolRegistry (system_status, create_note)"]
+        StateMachine["🎭 Character State Machine"]
+        SpeechDirector["🎙️ Speech Director (Audio Controller)"]
+    end
+
+    subgraph Backends ["Lokale Services & Storage"]
         Ollama["🦙 Ollama (qwen3-vl:4b / 8b)"]
         VoskSTT["🎤 Vosk Offline STT (German)"]
-        TTSMicroservice["🔊 Qwen3-TTS 0.6B (CUDA Service :18765)"]
-        PipeWire["🎧 PipeWire / PulseAudio Sink"]
-        SQLiteDB["🗄️ SQLite WAL (~/.local/share/kiki/)"]
+        TTSMicroservice["🔊 Qwen3-TTS 0.6B (CUDA :18765)"]
+        PipeWire["🎧 PipeWire / PulseAudio"]
+        SQLiteDB["🗄️ SQLite WAL & Notes Workspace"]
     end
 
+    ChatWindow -->|/agent Task| AsyncBridge
+    ChatWindow -->|Chat| AsyncBridge
+    ConfirmDialog --> AsyncBridge
     PetWindow --> AsyncBridge
-    ChatWindow --> AsyncBridge
     CodeWindow --> AsyncBridge
     SettingsDialog --> AsyncBridge
 
-    AsyncBridge <--> EventBus
-    EventBus <--> ChatService
-    EventBus <--> StateMachine
-    EventBus <--> SpeechDirector
+    AsyncBridge <--> HarnessSession
+    AsyncBridge <--> ChatService
+    AsyncBridge <--> StateMachine
+    AsyncBridge <--> SpeechDirector
 
-    ChatService --> ToolExecutor
+    HarnessSession --> AgentRunner
+    AgentRunner --> ToolRegistry
+    AgentRunner --> Ollama
+
     ChatService --> Ollama
     ChatService --> SQLiteDB
 
@@ -271,14 +311,14 @@ Ausführliche Latenzanalysen und Architekturdetails: [docs/VOICE_SUBSYSTEM.md](d
 
 ## 🧪 Entwicklung & Tests
 
-Die Testsuite umfasst über 720 automatisierte Tests für alle Schichten:
+Die Testsuite umfasst über **1.320 automatisierte Tests** für alle Schichten (Harness, Audio-Pipeline, UI-Event-Handling, Storage, Tool-Policy und Workspaces):
 
 ```bash
 # Alle Tests ausführen
-pytest
+PYTHONPATH=src pytest
 
 # Code-Linting mit Ruff
-ruff check src tests
+ruff check src tests services
 
 # RPM-Paket und Installer im Projektverzeichnis bauen
 ./scripts/build-rpm.sh
