@@ -1010,3 +1010,110 @@ def test_no_shell_is_ever_used() -> None:
     assert "shell=True" not in source
     assert "os.system" not in source
     assert "create_subprocess_shell" not in source
+
+
+# --- what actually goes on the wire -----------------------------------------
+
+
+def test_the_streaming_body_names_the_language_and_the_voice() -> None:
+    """The acceptance criterion, checked on the JSON that really gets sent.
+
+    The director builds `TTSRequest(text=...)` with no speaker and no language,
+    so the values must come from the provider's configuration — the same
+    `tts.speaker` / `tts.language` the WAV route is given.
+    """
+    log: list[dict] = []
+    provider = StreamingServiceTTSProvider(
+        "http://127.0.0.1:18765",
+        speaker="Serena",
+        language="German",
+        client_factory=_factory([FakeResponse(pieces=[_pcm(9600)])], log=log),
+    )
+    _collect(provider, TTSRequest(text="Hallo Martin."))
+
+    body = [entry for entry in log if entry["method"] == "POST"][0]["json"]
+    assert body["language"] == "German"
+    assert body["speaker"] == "Serena"
+
+
+def test_both_routes_are_handed_the_same_language_and_voice() -> None:
+    """No drift between the two providers: same configuration in, same values
+    out, so the model is asked in German either way."""
+    from kiki.voice.tts.adapters import ServiceTTSProvider
+
+    seen: list[dict] = []
+
+    async def _wav_synth(base_url, text, *, dest, language, speaker, timeout):
+        seen.append({"text": text, "language": language, "speaker": speaker})
+        return _write_wav_file(dest)
+
+    async def _wav_health(base_url, **_kwargs):
+        from kiki.voice.tts_client import TtsHealth
+
+        return TtsHealth(ok=True, ready=True, detail="")
+
+    wav = ServiceTTSProvider(
+        "http://127.0.0.1:18765", speaker="Serena", language="German",
+        synthesize=_wav_synth, health=_wav_health,
+    )
+
+    log: list[dict] = []
+    streaming = StreamingServiceTTSProvider(
+        "http://127.0.0.1:18765", speaker="Serena", language="German",
+        client_factory=_factory([FakeResponse(pieces=[_pcm(9600)])], log=log),
+    )
+
+    request = TTSRequest(text="Status erledigt und 20 Euro.")
+
+    async def go():
+        await wav.load()
+        async for _chunk in wav.synthesize(request):
+            pass
+        await streaming.load()
+        async for _chunk in streaming.synthesize(TTSRequest(text=request.text)):
+            pass
+
+    asyncio.run(go())
+
+    pcm_body = [entry for entry in log if entry["method"] == "POST"][0]["json"]
+    assert seen[0]["language"] == pcm_body["language"] == "German"
+    assert seen[0]["speaker"] == pcm_body["speaker"] == "Serena"
+    assert seen[0]["text"] == pcm_body["text"] == request.text
+
+
+def _write_wav_file(dest):
+    import wave
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(dest), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24_000)
+        handle.writeframes(_pcm(2400))
+    return dest
+
+
+def test_the_normalised_text_is_what_reaches_the_wire() -> None:
+    """Emoji and symbols are resolved before either provider sees the text, so
+    nothing decorative can reach the model and steer the voice."""
+    from kiki.voice.tts_text import speakable
+
+    raw = "Status ✅ und 20 € — siehe https://example.com"
+    spoken = speakable(raw)
+    # The words around the URL stay; only the address goes. A sentence can end
+    # up dangling ("… siehe"), which is the honest cost of not reading URLs out.
+    assert spoken == "Status erledigt und 20 Euro — siehe"
+
+    log: list[dict] = []
+    provider = StreamingServiceTTSProvider(
+        "http://127.0.0.1:18765", speaker="Serena", language="German",
+        client_factory=_factory([FakeResponse(pieces=[_pcm(9600)])], log=log),
+    )
+    _collect(provider, TTSRequest(text=spoken))
+
+    sent = [entry for entry in log if entry["method"] == "POST"][0]["json"]["text"]
+    assert sent == spoken
+    assert "✅" not in sent
+    assert "€" not in sent
+    assert "http" not in sent

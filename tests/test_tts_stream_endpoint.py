@@ -601,3 +601,65 @@ def test_a_cancelled_token_stops_the_pump() -> None:
     assert written == []
     assert firsts == []
     assert outcome.cancelled is True
+
+
+# --- the language both routes hand to Qwen ----------------------------------
+
+
+def _resolvers():
+    mod = _server_module()
+    languages = ["auto", "chinese", "english", "french", "german", "italian"]
+    speakers = ["aiden", "serena", "vivian"]
+
+    def wav(wanted: str) -> str:
+        return mod.QwenSynthesizer._resolve(wanted, languages, mod.DEFAULT_LANGUAGE)
+
+    def pcm(wanted: str) -> str:
+        spec = sh.validate_stream_request(
+            {"text": "x", "language": wanted, "speaker": "Serena"},
+            speakers=speakers,
+            languages=languages,
+            default_language=mod.DEFAULT_LANGUAGE,
+            default_speaker=mod.DEFAULT_SPEAKER,
+        )
+        return spec.language
+
+    return wav, pcm
+
+
+@pytest.mark.parametrize("wanted", ["German", "german", "GERMAN", "  German  "])
+def test_both_routes_resolve_the_language_to_the_same_value(wanted) -> None:
+    """The WAV path goes through QwenSynthesizer._resolve, the PCM path through
+    validate_stream_request. Whatever KIKI is configured with, Qwen must be
+    called with the identical string on both."""
+    wav, pcm = _resolvers()
+    assert wav(wanted) == pcm(wanted) == "german"
+
+
+def test_both_routes_resolve_the_speaker_to_the_same_value() -> None:
+    mod = _server_module()
+    speakers = ["aiden", "serena", "vivian"]
+    assert mod.QwenSynthesizer._resolve("Serena", speakers, mod.DEFAULT_SPEAKER) == "serena"
+
+    spec = sh.validate_stream_request(
+        {"text": "x", "speaker": "Serena", "language": "German"},
+        speakers=speakers,
+        languages=["german"],
+        default_language=mod.DEFAULT_LANGUAGE,
+        default_speaker=mod.DEFAULT_SPEAKER,
+    )
+    assert spec.speaker == "serena"
+
+
+def test_an_unknown_language_is_where_the_two_routes_differ() -> None:
+    """Documented on purpose: the WAV path falls back to the configured default
+    — the rule that stopped a typo from silently switching the voice's gender —
+    while the streaming route refuses the request outright.
+
+    Only reachable from a hand-edited config; for every value KIKI itself uses,
+    the test above shows the two agree.
+    """
+    wav, pcm = _resolvers()
+    assert wav("Klingonisch") == "german"
+    with pytest.raises(sh.StreamValidationError):
+        pcm("Klingonisch")
