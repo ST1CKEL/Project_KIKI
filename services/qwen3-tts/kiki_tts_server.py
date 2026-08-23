@@ -36,6 +36,7 @@ from streaming_http import (  # noqa: E402
     STREAM_FORMAT,
     STREAM_SAMPLE_RATE,
     CancelToken,
+    EngineUnavailable,
     StreamGate,
     StreamValidationError,
     pump_pcm,
@@ -246,6 +247,8 @@ class TtsHandler(BaseHTTPRequestHandler):
                     # A client must be able to see whether the PCM route exists
                     # *before* it starts an answer with it.
                     "streaming": self._streaming_available(),
+                    # A category, never an internal message or a path.
+                    "streaming_reason": self._streaming_reason(),
                     "stream_format": STREAM_FORMAT,
                     "stream_sample_rate": STREAM_SAMPLE_RATE,
                 },
@@ -263,6 +266,15 @@ class TtsHandler(BaseHTTPRequestHandler):
     def _streaming_available(self) -> bool:
         engine = self.stream_engine
         return bool(engine is not None and getattr(engine, "available", False))
+
+    def _streaming_reason(self) -> str | None:
+        if self._streaming_available():
+            return None
+        engine = self.stream_engine
+        if engine is None:
+            return "no_engine"
+        reason = getattr(engine, "reason", None)
+        return str(reason) if reason else "runtime_incompatible"
 
     def _read_json_body(self) -> dict[str, Any] | None:
         """Read and decode the request body, answering the caller on failure."""
@@ -384,6 +396,15 @@ class TtsHandler(BaseHTTPRequestHandler):
                 token=token,
                 peer_gone=self._peer_gone,
             )
+        except EngineUnavailable as exc:
+            # Runtime cannot stream, or one generation already holds the model.
+            # Both are "try later", not "the request was wrong".
+            log.info("stream refused: %s", type(exc).__name__)
+            self._send_json(
+                503,
+                {"ok": False, "streaming": False, "error": "Streaming nicht verfügbar"},
+            )
+            return
         except Exception as exc:
             # Nothing left the socket yet, so the failure can still be an
             # honest HTTP status instead of silence.
@@ -461,6 +482,28 @@ class TtsHandler(BaseHTTPRequestHandler):
         self._send(200, wav, "audio/wav")
 
 
+def _build_stream_engine(synth: Any) -> Any:
+    """Attach the streaming engine, or leave the WAV route alone.
+
+    Every failure here is non-fatal by design: the service must start and keep
+    answering WAV requests on a machine whose streaming runtime is missing or
+    has moved on. /health then reports why.
+    """
+    try:
+        from streaming_engine import QwenStreamingEngine
+
+        engine = QwenStreamingEngine(synth)
+    except Exception:
+        log.warning("streaming engine unavailable", exc_info=False)
+        return None
+    log.info(
+        "streaming %s%s",
+        "ready" if engine.available else "disabled",
+        "" if engine.available else f" ({engine.reason})",
+    )
+    return engine
+
+
 def _bind_host(host: str) -> str:
     text = host.strip() or DEFAULT_HOST
     if text not in {"127.0.0.1", "localhost", "::1"}:
@@ -499,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
             traceback.print_exc()
             return 1
     TtsHandler.synthesizer = synth
+    TtsHandler.stream_engine = _build_stream_engine(synth)
     httpd = ThreadingHTTPServer((host, int(args.port)), TtsHandler)
     log.info("listening on http://%s:%s  model=%s", host, args.port, getattr(synth, "model_id", "unknown"))
     try:

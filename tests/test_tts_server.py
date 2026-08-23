@@ -197,3 +197,65 @@ def test_the_handler_still_speaks_http_1_0() -> None:
     the leftovers — a follow-up GET /health came back 400 instead of 200."""
     mod = _load_server()
     assert mod.TtsHandler.protocol_version == "HTTP/1.0"
+
+
+def test_health_reports_why_streaming_is_off() -> None:
+    """A client needs to know *before* an answer whether the PCM route exists,
+    and the reason must be a category — never a path or an internal message."""
+    mod, httpd = _dummy_server()
+
+    class _Refusing:
+        available = False
+        reason = "runtime_incompatible"
+
+    mod.TtsHandler.stream_engine = _Refusing()
+    try:
+        conn = HTTPConnection(*httpd.server_address[:2], timeout=5)
+        conn.request("GET", "/health")
+        payload = json.loads(conn.getresponse().read())
+        conn.close()
+    finally:
+        mod.TtsHandler.stream_engine = None
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert payload["streaming"] is False
+    assert payload["streaming_reason"] == "runtime_incompatible"
+    assert "/" not in payload["streaming_reason"]
+
+
+def test_health_reports_no_reason_when_streaming_works() -> None:
+    mod, httpd = _dummy_server()
+
+    class _Ready:
+        available = True
+        reason = None
+
+    mod.TtsHandler.stream_engine = _Ready()
+    try:
+        conn = HTTPConnection(*httpd.server_address[:2], timeout=5)
+        conn.request("GET", "/health")
+        payload = json.loads(conn.getresponse().read())
+        conn.close()
+    finally:
+        mod.TtsHandler.stream_engine = None
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert payload["streaming"] is True
+    assert payload["streaming_reason"] is None
+
+
+def test_health_names_a_missing_engine() -> None:
+    _mod, httpd = _dummy_server()
+    try:
+        conn = HTTPConnection(*httpd.server_address[:2], timeout=5)
+        conn.request("GET", "/health")
+        payload = json.loads(conn.getresponse().read())
+        conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    assert payload["streaming"] is False
+    assert payload["streaming_reason"] == "no_engine"
