@@ -26,6 +26,18 @@ _HARNESS_MESSAGES: dict[str, str] = {
 }
 
 
+def parse_harness_command(text: str) -> str | None:
+    """If text starts with `/agent` (followed by whitespace or end of line),
+    returns the stripped task string (which may be empty). Otherwise None.
+    """
+    if not text.startswith("/agent"):
+        return None
+    remainder = text[len("/agent") :]
+    if remainder and not remainder[0].isspace():
+        return None
+    return remainder.strip()
+
+
 class ChatWindow(Adw.ApplicationWindow):
     def __init__(
         self,
@@ -341,6 +353,23 @@ class ChatWindow(Adw.ApplicationWindow):
         pending = list(self._pending_images)
         if not text and not pending:
             return
+
+        harness_task = parse_harness_command(text)
+        if harness_task is not None:
+            buf.set_text("", -1)
+            self._pending_images.clear()
+            self._refresh_attach_bar()
+            if not harness_task:
+                self.show_toast("Bitte gib nach /agent eine Aufgabe an.")
+                return
+            self.append_user_note(text)
+            app = self.get_application()
+            ask_fn = getattr(app, "ask_harness", None)
+            if callable(ask_fn):
+                ask_fn(harness_task)
+            self._reload_sidebar(self._conversation.id if self._conversation else None)
+            return
+
         buf.set_text("", -1)
         self._pending_images.clear()
         self._refresh_attach_bar()
@@ -488,6 +517,21 @@ class ChatWindow(Adw.ApplicationWindow):
         self._scroll_to_end()
         if toast:
             self.show_toast(toast)
+
+    def append_user_note(self, text: str) -> None:
+        """Show a local user message in the open chat and persist it.
+
+        Does not drive a model stream, tool execution, or speech.
+        """
+        if self._conversation is None:
+            self._new_conversation()
+        assert self._conversation is not None
+        body = (text or "").strip()
+        if not body:
+            return
+        self._chats.add_message(self._conversation.id, "user", body)
+        self._messages.append(ChatBubble("user", body))
+        self._scroll_to_end()
 
     def submit_transcript(self, text: str, *, send: bool) -> None:
         self._input.get_buffer().set_text(text)

@@ -505,6 +505,9 @@ class _AppStub:
     def _toast(self, text: str) -> None:
         self.toasts.append(text)
 
+    def _on_harness_bridge_error(self, _exc: BaseException) -> None:
+        self.toasts.append("KIKI konnte die Aufgabe nicht starten.")
+
     def notify_status(self, _title: str, text: str) -> None:
         self.toasts.append(text)
 
@@ -513,6 +516,25 @@ def _app_method(name: str):
     from kiki.application import KikiApplication
 
     return getattr(KikiApplication, name)
+
+
+def _wired_stub(tmp_path, *, chat=None, speech=None, harness=object()):
+    stub = _AppStub(tmp_path)
+    stub._harness = harness
+    stub._chat = chat
+    stub._speech = speech
+    stub._settings = _TtsOn()
+    for name in (
+        "_apply_harness_answer",
+        "_apply_harness_speak",
+        "_apply_harness_status",
+        "_harness_delivery_failed",
+        "_on_harness_bridge_error",
+        "ask_harness",
+        "cancel_harness",
+    ):
+        setattr(type(stub), name, _app_method(name))
+    return stub
 
 
 def test_the_ui_entry_point_refuses_empty_text(tmp_path) -> None:
@@ -919,6 +941,25 @@ class _ChatWindowDouble:
         from kiki.ui.chat_window import ChatWindow
 
         ChatWindow.clear_harness_status(self, run_id=run_id)
+
+    def append_user_note(self, text: str) -> None:
+        from kiki.ui.chat_window import ChatWindow
+
+        ChatWindow.append_user_note(self, text)
+
+    def append_note(self, text: str, *, toast: str | None = None) -> None:
+        from kiki.ui.chat_window import ChatWindow
+
+        ChatWindow.append_note(self, text, toast=toast)
+
+    def _on_stream_item(self, event) -> None:
+        pass
+
+    def _on_stream_error(self, exc) -> None:
+        pass
+
+    def _on_stream_complete(self) -> None:
+        pass
 
     def get_application(self):
         double = self
@@ -1409,3 +1450,354 @@ def test_new_run_after_terminal_gets_distinct_run_id(tmp_path) -> None:
     assert [e.message_code for e in events_run1] == ["working", "completed"]
     assert len(events_run2) == 2
     assert [e.message_code for e in events_run2] == ["working", "completed"]
+
+
+# --- Slice 2C: /agent routing to harness -----------------------------------
+
+
+class _FakeBubble:
+    def __init__(self, role: str, text: str, **kwargs) -> None:
+        self.role = role
+        self.text = text
+
+
+def test_parse_harness_command_prefix_detection() -> None:
+    from kiki.ui.chat_window import parse_harness_command
+
+    # Valid task extractions
+    assert parse_harness_command("/agent Wie ist dein Status?") == "Wie ist dein Status?"
+    assert parse_harness_command("/agent    Aufgabe mit Leerzeichen") == "Aufgabe mit Leerzeichen"
+    assert parse_harness_command("/agent\tAufgabe mit Tab") == "Aufgabe mit Tab"
+    assert parse_harness_command("/agent\nAufgabe mit Zeilenumbruch") == "Aufgabe mit Zeilenumbruch"
+
+    # Empty tasks
+    assert parse_harness_command("/agent") == ""
+    assert parse_harness_command("/agent   ") == ""
+    assert parse_harness_command("/agent\t") == ""
+
+    # Regular chat messages (no harness command)
+    assert parse_harness_command("Hallo") is None
+    assert parse_harness_command("Ich schreibe /agent als Beispiel.") is None
+    assert parse_harness_command("/agentur ist kein Befehl.") is None
+    assert parse_harness_command("x/agent Aufgabe") is None
+    assert parse_harness_command("/Agent Aufgabe") is None
+    assert parse_harness_command("/AGENT Aufgabe") is None
+
+
+def test_chat_send_routes_agent_command_to_ask_harness_and_never_to_chat_service(monkeypatch) -> None:
+    monkeypatch.setattr("kiki.ui.chat_window.ChatBubble", _FakeBubble)
+    from kiki.ui.chat_window import ChatWindow
+
+    class _FakeBuffer:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def get_text(self, _start, _end, _hidden):
+            return self._text
+
+        def get_start_iter(self):
+            return None
+
+        def get_end_iter(self):
+            return None
+
+        def set_text(self, text: str, _length: int = -1):
+            self._text = text
+
+    class _FakeTextView:
+        def __init__(self, text: str) -> None:
+            self._buffer = _FakeBuffer(text)
+
+        def get_buffer(self):
+            return self._buffer
+
+    class _FakeConversation:
+        id = "conv-1"
+
+    class _FakeChats:
+        def __init__(self) -> None:
+            self.added: list[tuple[str, str, str]] = []
+
+        def add_message(self, conv_id: str, role: str, text: str):
+            self.added.append((conv_id, role, text))
+
+    class _App:
+        def __init__(self) -> None:
+            self.asked: list[str] = []
+
+        def ask_harness(self, text: str) -> bool:
+            self.asked.append(text)
+            return True
+
+    class _Service:
+        def __init__(self) -> None:
+            self.sent: list[tuple[Any, ...]] = []
+
+        def send(self, *args, **kwargs):
+            self.sent.append(args)
+            raise AssertionError("ChatService.send must never be called for /agent")
+
+    class _FakeBox:
+        def __init__(self) -> None:
+            self.children: list[object] = []
+
+        def append(self, child):
+            self.children.append(child)
+
+    window = _ChatWindowDouble()
+    window._conversation = _FakeConversation()
+    window._stream = None
+    window._pending_images = []
+    window._input = _FakeTextView("/agent Wie ist dein Status?")
+    window._chats = _FakeChats()
+    window._messages = _FakeBox()
+    window._service = _Service()
+    window._toasts = []
+    window.show_toast = lambda text: window._toasts.append(text)
+    window._reload_sidebar = lambda *_: None
+    window._scroll_to_end = lambda *_: None
+    window._refresh_attach_bar = lambda *_: None
+    app = _App()
+    window.get_application = lambda: app
+
+    ChatWindow._send(window)
+
+    # Input cleared
+    assert window._input.get_buffer().get_text(None, None, False) == ""
+    # ask_harness called with stripped task (without /agent)
+    assert app.asked == ["Wie ist dein Status?"]
+    # ChatService.send was NEVER called
+    assert window._service.sent == []
+    # User message saved with original /agent text
+    assert window._chats.added == [("conv-1", "user", "/agent Wie ist dein Status?")]
+    assert len(window._messages.children) == 1
+    assert window._messages.children[0].text == "/agent Wie ist dein Status?"
+
+
+def test_chat_send_empty_agent_command_shows_toast_and_calls_nothing() -> None:
+    from kiki.ui.chat_window import ChatWindow
+
+    class _FakeBuffer:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def get_text(self, _start, _end, _hidden):
+            return self._text
+
+        def get_start_iter(self):
+            return None
+
+        def get_end_iter(self):
+            return None
+
+        def set_text(self, text: str, _length: int = -1):
+            self._text = text
+
+    class _FakeTextView:
+        def __init__(self, text: str) -> None:
+            self._buffer = _FakeBuffer(text)
+
+        def get_buffer(self):
+            return self._buffer
+
+    class _FakeConversation:
+        id = "conv-1"
+
+    class _App:
+        def __init__(self) -> None:
+            self.asked: list[str] = []
+
+        def ask_harness(self, text: str) -> bool:
+            self.asked.append(text)
+            return True
+
+    for empty_cmd in ("/agent", "/agent   ", "/agent\t"):
+        window = _ChatWindowDouble()
+        window._conversation = _FakeConversation()
+        window._stream = None
+        window._pending_images = []
+        window._input = _FakeTextView(empty_cmd)
+        window._toasts = []
+        window.show_toast = lambda text: window._toasts.append(text)
+        window._refresh_attach_bar = lambda *_: None
+        app = _App()
+        window.get_application = lambda: app
+
+        ChatWindow._send(window)
+
+        assert window._input.get_buffer().get_text(None, None, False) == ""
+        assert app.asked == []
+        assert window._toasts == ["Bitte gib nach /agent eine Aufgabe an."]
+
+
+def test_chat_send_regular_message_routes_to_chat_service_and_never_to_harness(monkeypatch) -> None:
+    monkeypatch.setattr("kiki.ui.chat_window.ChatBubble", _FakeBubble)
+    from kiki.ui.chat_window import ChatWindow
+
+    class _FakeBuffer:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def get_text(self, _start, _end, _hidden):
+            return self._text
+
+        def get_start_iter(self):
+            return None
+
+        def get_end_iter(self):
+            return None
+
+        def set_text(self, text: str, _length: int = -1):
+            self._text = text
+
+    class _FakeTextView:
+        def __init__(self, text: str) -> None:
+            self._buffer = _FakeBuffer(text)
+
+        def get_buffer(self):
+            return self._buffer
+
+    class _FakeConversation:
+        id = "conv-1"
+
+    class _App:
+        def __init__(self) -> None:
+            self.asked: list[str] = []
+
+        def ask_harness(self, text: str) -> bool:
+            self.asked.append(text)
+            return True
+
+    class _FakeBridge:
+        def __init__(self) -> None:
+            self.streamed = []
+
+        def stream(self, gen, **kw):
+            self.streamed.append(gen)
+            return "handle"
+
+    class _FakeBox:
+        def __init__(self) -> None:
+            self.children: list[object] = []
+
+        def append(self, child):
+            self.children.append(child)
+
+    for regular_text in ("Hallo", "Ich schreibe /agent als Beispiel.", "/agentur Aufgabe"):
+        window = _ChatWindowDouble()
+        window._conversation = _FakeConversation()
+        window._stream = None
+        window._pending_images = []
+        window._input = _FakeTextView(regular_text)
+        window._messages = _FakeBox()
+        window._bridge = _FakeBridge()
+        window._service = object()
+        window._toasts = []
+        window.show_toast = lambda text: window._toasts.append(text)
+        window._reload_sidebar = lambda *_: None
+        window._scroll_to_end = lambda *_: None
+        window._refresh_attach_bar = lambda *_: None
+        app = _App()
+        window.get_application = lambda: app
+
+        ChatWindow._send(window)
+
+        # ask_harness was never called
+        assert app.asked == []
+        # bridge.stream was invoked for ChatService
+        assert len(window._bridge.streamed) == 1
+
+
+def test_harness_busy_or_failure_does_not_fall_back_to_chat_service(monkeypatch) -> None:
+    monkeypatch.setattr("kiki.ui.chat_window.ChatBubble", _FakeBubble)
+    from kiki.ui.chat_window import ChatWindow
+
+    class _FakeBuffer:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def get_text(self, _start, _end, _hidden):
+            return self._text
+
+        def get_start_iter(self):
+            return None
+
+        def get_end_iter(self):
+            return None
+
+        def set_text(self, text: str, _length: int = -1):
+            self._text = text
+
+    class _FakeTextView:
+        def __init__(self, text: str) -> None:
+            self._buffer = _FakeBuffer(text)
+
+        def get_buffer(self):
+            return self._buffer
+
+    class _FakeConversation:
+        id = "conv-1"
+
+    class _FakeChats:
+        def __init__(self) -> None:
+            self.added = []
+
+        def add_message(self, conv_id: str, role: str, text: str):
+            self.added.append((conv_id, role, text))
+
+    class _BusyApp:
+        def ask_harness(self, text: str) -> bool:
+            # Simulates busy/failure refusal
+            return False
+
+    class _Service:
+        def send(self, *args, **kwargs):
+            raise AssertionError("ChatService.send must never be called on harness refusal")
+
+    class _FakeBox:
+        def __init__(self) -> None:
+            self.children: list[object] = []
+
+        def append(self, child):
+            self.children.append(child)
+
+    window = _ChatWindowDouble()
+    window._conversation = _FakeConversation()
+    window._stream = None
+    window._pending_images = []
+    window._input = _FakeTextView("/agent Bitte berechnen")
+    window._chats = _FakeChats()
+    window._messages = _FakeBox()
+    window._service = _Service()
+    window._toasts = []
+    window.show_toast = lambda text: window._toasts.append(text)
+    window._reload_sidebar = lambda *_: None
+    window._scroll_to_end = lambda *_: None
+    window._refresh_attach_bar = lambda *_: None
+    window.get_application = lambda: _BusyApp()
+
+    ChatWindow._send(window)
+
+    # User bubble exists, but no ChatService fallback stream started
+    assert window._chats.added == [("conv-1", "user", "/agent Bitte berechnen")]
+    assert window._stream is None
+
+
+def test_ask_harness_bridge_error_toast(tmp_path) -> None:
+    session, _runner, _recorder, _workspace = _build(
+        tmp_path, [ModelAction.answer("fertig")]
+    )
+    stub = _AppStub(tmp_path)
+    stub._harness = session
+
+    class _FailingBridge:
+        def submit(self, coro, on_error=None, **kw):
+            coro.close()
+            raise RuntimeError("Bridge kaputt")
+
+    stub._bridge = _FailingBridge()
+    for name in ("ask_harness", "_on_harness_bridge_error"):
+        setattr(type(stub), name, _app_method(name))
+
+    assert stub.ask_harness("Eine Aufgabe") is False
+    assert stub.toasts == ["KIKI konnte die Aufgabe nicht starten."]

@@ -249,6 +249,10 @@ class KikiApplication(Adw.Application):
             log.warning("agent harness unavailable", exc_info=False)
             return None
 
+    def _on_harness_bridge_error(self, _exc: BaseException) -> None:
+        log.warning("harness bridge task failed", exc_info=False)
+        GLib.idle_add(self._toast, "KIKI konnte die Aufgabe nicht starten.")
+
     def ask_harness(self, user_text: str) -> bool:
         """Start one agent run from the UI. Returns False when it cannot."""
         text = (user_text or "").strip()
@@ -264,12 +268,11 @@ class KikiApplication(Adw.Application):
         try:
             self._bridge.submit(
                 session.ask(text),
-                on_error=lambda exc: self._on_harness_status(
-                    "KIKI konnte das nicht ausführen"
-                ),
+                on_error=self._on_harness_bridge_error,
             )
         except Exception:
             log.debug("could not hand the harness run to the bridge", exc_info=True)
+            self._toast("KIKI konnte die Aufgabe nicht starten.")
             return False
         return True
 
