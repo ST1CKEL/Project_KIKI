@@ -24,6 +24,7 @@ class PreferencesWindow(Adw.PreferencesDialog):
         on_change: Callable[[Settings], None],
         on_tts_test: Callable[[], None] | None = None,
         memories: object | None = None,
+        routines: object | None = None,
     ) -> None:
         super().__init__()
         self.set_title("KIKI-Einstellungen")
@@ -35,6 +36,9 @@ class PreferencesWindow(Adw.PreferencesDialog):
         self._memories = memories
         self._memory_group: Adw.PreferencesGroup | None = None
         self._memory_rows: list[Gtk.Widget] = []
+        self._routines = routines
+        self._routine_group: Adw.PreferencesGroup | None = None
+        self._routine_rows: list[Gtk.Widget] = []
         self._status = Gtk.Label(xalign=0, wrap=True)
         self._status.add_css_class("dim-label")
 
@@ -44,6 +48,8 @@ class PreferencesWindow(Adw.PreferencesDialog):
         self.add(self._page_personality())
         if memories is not None:
             self.add(self._page_memory())
+        if routines is not None:
+            self.add(self._page_routines())
 
     def _persist(self) -> None:
         save_settings(self._settings)
@@ -240,25 +246,28 @@ class PreferencesWindow(Adw.PreferencesDialog):
         agency = Adw.PreferencesGroup(title="Selbstständigkeit")
         agency.set_description(
             "Steuert, was KIKI von sich aus tun darf. Schreibende und externe "
-            "Aktionen zeigen in jeder Stufe eine Freigabekarte."
+            "Aktionen zeigen eine Freigabekarte — außer im Jarvis-Modus, der "
+            "bewusst ohne Rückfragen handelt."
         )
         use_tools = Adw.SwitchRow(title="KIKI darf Werkzeuge selbst aufrufen")
         use_tools.set_subtitle("Aus: KIKI antwortet nur mit Text und fragt dich nach Daten.")
         use_tools.set_active(self._settings.tools.model_tool_use)
         use_tools.connect("notify::active", lambda r, *_: self._set_model_tool_use(r.get_active()))
-        self._autonomy_ids = ["strict", "balanced", "trusted"]
+        self._autonomy_ids = ["strict", "balanced", "trusted", "jarvis"]
         levels = Gtk.StringList()
         for label in (
             "Nur lesen (strict)",
             "Lesen + Steuerung (balanced)",
             "… + Öffnen ohne Nachfrage (trusted)",
+            "… + Alles ohne Rückfragen (jarvis, experimentell)",
         ):
             levels.append(label)
         self._autonomy_row = Adw.ComboRow(title="Vertrauensstufe", model=levels)
         self._autonomy_row.set_subtitle(
             "„trusted“ lässt KIKI Ordner, Dateien, Terminal, Editor und Links selbst "
-            "öffnen — nur in registrierten Workspaces. Schreiben und Zwischenablage "
-            "fragen weiterhin."
+            "öffnen — nur in registrierten Workspaces. „jarvis“ handelt zusätzlich "
+            "Schreibendes und Externes ohne Karte; verbotene Befehle, der "
+            "Panic-Schalter und das Audit greifen weiterhin."
         )
         current_level = self._settings.tools.autonomy
         self._autonomy_row.set_selected(
@@ -420,6 +429,89 @@ class PreferencesWindow(Adw.PreferencesDialog):
 
         dialog.connect("response", _done)
         dialog.present(self)
+
+    def _page_routines(self) -> Adw.PreferencesPage:
+        page = Adw.PreferencesPage(title="Routinen", icon_name="emblem-synchronizing-symbolic")
+        intro = Adw.PreferencesGroup(title="Wenn-Dann-Routinen")
+        intro.set_description(
+            "Jede Routine wurde als komplettes Rezept bestätigt: Auslöser, "
+            "Werkzeug und Argumente. Sie feuert später genau so und ohne "
+            "erneute Frage — der Panic-Schalter hält sie jederzeit an."
+        )
+        page.add(intro)
+
+        self._routine_group = Adw.PreferencesGroup()
+        page.add(self._routine_group)
+
+        self._reload_routines()
+        return page
+
+    def _reload_routines(self) -> None:
+        group = self._routine_group
+        if group is None or self._routines is None:
+            return
+        for row in self._routine_rows:
+            group.remove(row)
+        self._routine_rows = []
+        try:
+            items = self._routines.list()
+        except Exception:
+            row = Adw.ActionRow(title="Routinen nicht lesbar")
+            group.add(row)
+            self._routine_rows.append(row)
+            return
+        if not items:
+            row = Adw.ActionRow(title="Noch keine Routinen")
+            row.set_subtitle(
+                "Sag KIKI zum Beispiel: „Wenn der Akku unter 15 Prozent fällt, "
+                "leg eine Notiz an.“"
+            )
+            group.add(row)
+            self._routine_rows.append(row)
+            return
+        group.set_title(f"{len(items)} Routinen")
+        for routine in items:
+            row = Adw.ActionRow(title=routine.name)
+            row.set_subtitle(
+                f"{routine.trigger.describe()} → {routine.tool_name} · "
+                f"{routine.fired_count}× gefeuert"
+            )
+            row.set_title_lines(0)
+            switch = Gtk.Switch(
+                active=routine.enabled, valign=Gtk.Align.CENTER, tooltip_text="Routine aktiv"
+            )
+
+            def _on_state_set(_switch: Gtk.Switch, state: bool, rid: str = routine.id) -> bool:
+                self._toggle_routine(rid, bool(state))
+                # False lets the switch keep its new visual state.
+                return False
+
+            switch.connect("state-set", _on_state_set)
+            row.add_suffix(switch)
+            button = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER)
+            button.add_css_class("flat")
+            button.set_tooltip_text("Diese Routine löschen")
+            button.connect("clicked", lambda _b, rid=routine.id: self._delete_routine(rid))
+            row.add_suffix(button)
+            group.add(row)
+            self._routine_rows.append(row)
+
+    def _toggle_routine(self, routine_id: str, enabled: bool) -> None:
+        if self._routines is None:
+            return
+        try:
+            self._routines.set_enabled(routine_id, enabled)
+        except Exception:
+            pass
+
+    def _delete_routine(self, routine_id: str) -> None:
+        if self._routines is None:
+            return
+        try:
+            self._routines.delete(routine_id)
+        except Exception:
+            pass
+        self._reload_routines()
 
     def _page_personality(self) -> Adw.PreferencesPage:
         from kiki.ai.persona import (

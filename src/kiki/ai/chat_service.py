@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from kiki.ai.agent_loop import AgentLoop
 from kiki.ai.factory import active_model, create_provider
 from kiki.ai.prompts import (
     DEFAULT_IMAGE_PROMPT,
@@ -16,16 +17,30 @@ from kiki.ai.prompts import (
     build_messages,
 )
 from kiki.ai.provider import ChatMessage, LLMProvider, ProviderError, ToolCapableProvider
+from kiki.assistant.adapter import ChatStepAdapter
+from kiki.assistant.run_service import failure_text
+from kiki.assistant.runner import AssistantRunner
 from kiki.config.settings import Settings
 from kiki.context.planner import ContextPlanner, PlannedContext
+from kiki.harness.confirmation import ConfirmationRequest
+from kiki.harness.models import RunStatus
+from kiki.paths import state_dir
 from kiki.runtime.event_bus import EventBus
 from kiki.storage.chat_repository import ChatRepository, Conversation
 from kiki.storage.memory_repository import MemoryRepository
 from kiki.storage.secrets import SecretStore
-from kiki.tools.executor import ConfirmFn, ToolExecutor, ToolResult
+from kiki.tools.executor import ToolExecutor, ToolResult
 from kiki.tools.exposure import declarations
+from kiki.tools.gateway import ToolGateway
 
 log = logging.getLogger(__name__)
+
+# The dialog callback for the agent path: it receives the card the runner
+# armed -- the display record with the request id -- and answers with a
+# verdict. It never computes an authorisation of its own.
+AssistantConfirm = Callable[[ConfirmationRequest], Awaitable[bool] | bool]
+
+CANCEL_TEXT = "Der Durchlauf wurde abgebrochen."
 
 
 @dataclass(frozen=True)
@@ -55,8 +70,9 @@ class ChatService:
         secrets: SecretStore,
         bus: EventBus,
         executor: ToolExecutor | None = None,
-        confirm: ConfirmFn | None = None,
+        confirm: AssistantConfirm | None = None,
         memories: MemoryRepository | None = None,
+        trace_dir: Path | None = None,
     ) -> None:
         self._settings = settings
         self._chats = chats
@@ -65,6 +81,7 @@ class ChatService:
         self._executor = executor
         self._confirm = confirm
         self._memories = memories
+        self._trace_dir = trace_dir
         self._planner = ContextPlanner()
         # Diagnostics only. The plan a request is built from is passed down the
         # call chain; reading this back after concurrent turns reports whichever
@@ -78,7 +95,7 @@ class ChatService:
         if self._executor is not None:
             self._executor.policy.set_autonomy(self._settings.tools.autonomy)
 
-    def set_confirm(self, confirm: ConfirmFn | None) -> None:
+    def set_confirm(self, confirm: AssistantConfirm | None) -> None:
         self._confirm = confirm
 
     def _active_memories(self) -> list[Any]:
@@ -175,7 +192,7 @@ class ChatService:
         try:
             model = active_model(self._settings)
             stream = (
-                self._run_agent(messages, model=model, plan=plan)
+                self._run_agent(messages, model=model, plan=plan, user_text=text)
                 if self.tools_active()
                 else self._run_plain(messages, model=model, plan=plan)
             )
@@ -235,8 +252,21 @@ class ChatService:
             yield StreamEvent(kind="delta", text=delta)
 
     async def _run_agent(
-        self, messages: list[ChatMessage], *, model: str, plan: PlannedContext | None = None
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str,
+        plan: PlannedContext | None = None,
+        user_text: str = "",
     ) -> AsyncIterator[StreamEvent]:
+        """One chat turn on the unified runner.
+
+        The same `AssistantRunner` the agent path uses, with a step adapter
+        that owns this turn's planned conversation. What the turn loses is the
+        old loop's private ideas: refusals now come back as categories, limits
+        end the turn visibly instead of fading into a half answer, and the
+        run is traced like any other run -- length and shapes, never content.
+        """
         assert self._executor is not None
         executor = self._executor
         tools = declarations(
@@ -249,33 +279,76 @@ class ChatService:
             async for event in self._run_plain(messages, model=model, plan=plan):
                 yield event
             return
-        loop = AgentLoop(
-            self.provider(),
+        # Built per turn from live sources: the panic switch must take effect
+        # mid-turn, including after an approval card was already answered.
+        gateway = ToolGateway(
             executor,
+            panic_check=lambda: self._settings.app.privacy_panic,
+            integrations_check=self._settings.integrations_active,
+        )
+        adapter = ChatStepAdapter(
+            self.provider(),
+            model=model,
+            temperature=self._settings.ai.temperature,
+            messages=messages,
+            num_ctx=plan.num_ctx if plan else None,
+        )
+        runner = AssistantRunner(
+            adapter,
+            gateway,
+            trace_dir=self._trace_dir or (state_dir() / "assistant"),
             max_steps=self._settings.tools.max_steps,
             max_tool_calls=self._settings.tools.max_tool_calls,
         )
-        async for event in loop.run(
-            messages,
-            model=model,
-            temperature=self._settings.ai.temperature,
-            tools=tools,
-            num_ctx=plan.num_ctx if plan else None,
-            # Re-read on every call: the panic switch must take effect mid-turn.
-            panic_check=lambda: self._settings.app.privacy_panic,
-            integrations_check=self._settings.integrations_active,
-            confirm=self._confirm,
-        ):
+        run = runner.begin(user_text)
+        async for event in runner.drive(run):
             if event.kind == "delta":
                 yield StreamEvent(kind="delta", text=event.text)
             elif event.kind == "tool_start":
-                yield StreamEvent(
-                    kind="tool_start", tool=event.tool, text=event.title or event.tool
-                )
+                yield StreamEvent(kind="tool_start", tool=event.tool, text=event.text)
             elif event.kind == "tool_end":
                 yield StreamEvent(kind="tool_end", tool=event.tool, text=event.text, ok=event.ok)
-            elif event.kind == "error":
-                yield StreamEvent(kind="error", text=event.text)
+            elif event.kind == "confirmation_requested":
+                await self._settle_confirmation(runner, event.request)
+            elif event.kind == "finished":
+                # The deltas already streamed; a completed turn needs nothing
+                # more. Everything else is a turn that did not end in an
+                # answer, and the chat must say so instead of storing silence.
+                if run.status is not RunStatus.COMPLETED:
+                    yield StreamEvent(kind="error", text=self._failure_line(run, adapter))
+                return
+
+    async def _settle_confirmation(
+        self,
+        runner: AssistantRunner,
+        request: ConfirmationRequest | None,
+    ) -> None:
+        """Take the card to the dialog while the runner holds the question.
+
+        The answer travels back the only way it may: the request id the card
+        was armed with, spent through the runner, so the broker behind the
+        gateway mints the grant -- or refuses it if anything moved.
+        """
+        if request is None:
+            return
+        allowed: object = False
+        if self._confirm is not None:
+            allowed = self._confirm(request)
+            if inspect.isawaitable(allowed):
+                allowed = await allowed
+        if allowed:
+            runner.confirm(request.run_id, request.call_id, request.request_id)
+        else:
+            runner.reject(request.run_id, request.call_id)
+
+    def _failure_line(self, run: Any, adapter: ChatStepAdapter) -> str:
+        if run.error_code == "provider_error" and adapter.last_provider_message:
+            # The provider's own sentence, shown exactly as the plain path
+            # shows it. It never passed through the runner.
+            return adapter.last_provider_message
+        if run.status is RunStatus.CANCELLED:
+            return CANCEL_TEXT
+        return failure_text(run.error_code)
 
     async def collect_status(self, names: list[str] | None = None) -> dict[str, Any]:
         """Run read-only status tools. Never invoked implicitly by the model."""

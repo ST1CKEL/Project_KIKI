@@ -121,6 +121,38 @@ def _unlink(path: Path) -> None:
         pass
 
 
+def spec(workspace: NotesWorkspace) -> Any:
+    """`create_note` as the production registry defines tools.
+
+    WRITE, so the policy asks for a confirmation on every autonomy level below
+    jarvis — the harness no longer decides that for itself.
+    """
+    from kiki.tools.policy import RiskLevel
+    from kiki.tools.registry import ToolSpec
+
+    tool = CreateNoteTool(workspace)
+
+    def _handler(params: dict[str, Any]) -> dict[str, Any]:
+        name, content = tool.normalise(params)
+        return {"created": True, "note": workspace.create(name, content)}
+
+    return ToolSpec(
+        name=CreateNoteTool.name,
+        title="Notiz anlegen",
+        description=CreateNoteTool.description,
+        risk=RiskLevel.WRITE,
+        parameters=dict(CreateNoteTool.input_schema),
+        handler=_handler,
+        effect="Legt eine neue Notiz im KIKI-Notizbereich an.",
+        auto_allow=True,
+        requires_integration=False,
+        model_callable=True,
+        # The note text is the payload; it has no business in a security log.
+        sensitive_parameters=("content",),
+        audit_parameters=("title",),
+    )
+
+
 class CreateNoteTool:
     """`create_note`. Proposes; the harness will not run it unconfirmed."""
 
@@ -153,6 +185,10 @@ class CreateNoteTool:
         """
         name, content = self._normalise(arguments)
         return self._workspace.relative(name), content
+
+    def normalise(self, arguments: dict[str, Any]) -> tuple[str, str]:
+        """Validated title and content, or a category. Shared with the ToolSpec."""
+        return self._normalise(arguments)
 
     def _normalise(self, arguments: dict[str, Any]) -> tuple[str, str]:
         title = arguments.get("title")

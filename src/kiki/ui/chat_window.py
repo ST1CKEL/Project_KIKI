@@ -10,20 +10,12 @@ from kiki.ai.vision import VisionEncodeError, encode_image_file
 from kiki.config.settings import Settings
 from kiki.runtime.async_bridge import AsyncBridge, StreamHandle
 from kiki.storage.chat_repository import ChatRepository, Conversation
+from kiki.ui.run_bar_model import CANCEL_PENDING_TEXT, CANCEL_TEXT, run_bar_for
 from kiki.ui.widgets.chat_bubble import ChatBubble
 
 log = logging.getLogger(__name__)
 
 MAX_ATTACHMENTS = 2
-
-_HARNESS_MESSAGES: dict[str, str] = {
-    "working": "KIKI arbeitet …",
-    "tool_running": "KIKI führt eine Aufgabe aus …",
-    "needs_confirmation": "KIKI wartet auf deine Bestätigung.",
-    "cancelled": "KIKI wurde abgebrochen.",
-    "failed": "KIKI konnte die Aufgabe nicht ausführen.",
-    "limit_reached": "KIKI hat die Aufgabe aus Sicherheitsgründen beendet.",
-}
 
 
 def parse_harness_command(text: str) -> str | None:
@@ -60,7 +52,7 @@ class ChatWindow(Adw.ApplicationWindow):
         self._stream_bubble: ChatBubble | None = None
         self._stream_text = ""
         self._pending_images: list[dict[str, str]] = []
-        self._harness_run_id: str | None = None
+        self._run_bar_run_id: str | None = None
 
         self._toast = Adw.ToastOverlay()
         split = Adw.NavigationSplitView(min_sidebar_width=220, sidebar_width_fraction=0.28)
@@ -174,27 +166,27 @@ class ChatWindow(Adw.ApplicationWindow):
         drop.connect("drop", self._on_drop_files)
         self.add_controller(drop)
 
-        self._harness_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self._harness_bar.set_margin_start(8)
-        self._harness_bar.set_margin_end(8)
-        self._harness_bar.set_margin_top(4)
-        self._harness_bar.set_margin_bottom(4)
-        self._harness_bar.set_visible(False)
+        self._run_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._run_bar.set_margin_start(8)
+        self._run_bar.set_margin_end(8)
+        self._run_bar.set_margin_top(4)
+        self._run_bar.set_margin_bottom(4)
+        self._run_bar.set_visible(False)
 
-        self._harness_spinner = Gtk.Spinner()
-        self._harness_label = Gtk.Label(
+        self._run_spinner = Gtk.Spinner()
+        self._run_label = Gtk.Label(
             label="", xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END
         )
-        self._harness_cancel_btn = Gtk.Button(label="Abbrechen")
-        self._harness_cancel_btn.add_css_class("flat")
-        self._harness_cancel_btn.connect("clicked", lambda *_: self._on_cancel_harness_clicked())
+        self._run_cancel_btn = Gtk.Button(label="Abbrechen")
+        self._run_cancel_btn.add_css_class("flat")
+        self._run_cancel_btn.connect("clicked", lambda *_: self._on_cancel_run_clicked())
 
-        self._harness_bar.append(self._harness_spinner)
-        self._harness_bar.append(self._harness_label)
-        self._harness_bar.append(self._harness_cancel_btn)
+        self._run_bar.append(self._run_spinner)
+        self._run_bar.append(self._run_label)
+        self._run_bar.append(self._run_cancel_btn)
 
         bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        bottom.append(self._harness_bar)
+        bottom.append(self._run_bar)
         bottom.append(self._attach_bar)
         bottom.append(frame)
         bottom.append(actions)
@@ -247,7 +239,7 @@ class ChatWindow(Adw.ApplicationWindow):
 
     def _open_conversation(self, conv: Conversation) -> None:
         self._cancel_stream()
-        self.clear_harness_status()
+        self.clear_run_status()
         self._conversation = conv
         self._clear_messages()
         for msg in self._chats.list_messages(conv.id):
@@ -551,67 +543,70 @@ class ChatWindow(Adw.ApplicationWindow):
         self._input.get_buffer().set_text(text)
         self._send()
 
-    def clear_harness_status(self, run_id: str | None = None) -> None:
+    def clear_run_status(self, run_id: str | None = None) -> None:
         """Clear the status bar. If run_id is given, only if it matches."""
-        if not hasattr(self, "_harness_bar"):
+        if not hasattr(self, "_run_bar"):
             return
-        if run_id is not None and self._harness_run_id is not None and self._harness_run_id != run_id:
+        if run_id is not None and self._run_bar_run_id is not None and self._run_bar_run_id != run_id:
             return
-        self._harness_bar.set_visible(False)
-        self._harness_spinner.stop()
-        self._harness_run_id = None
+        self._run_bar.set_visible(False)
+        self._run_spinner.stop()
+        self._run_bar_run_id = None
 
-    def set_harness_status(
+    def set_run_status(
         self,
         *,
         run_id: str,
         message_code: str,
         terminal: bool = False,
     ) -> None:
-        """Show or update the transient status bar for a specific run."""
-        if not hasattr(self, "_harness_bar"):
+        """Show or update the run bar for a specific run.
+
+        The bar's content is decided by `run_bar_model`; this method only
+        renders it and keeps the run binding -- late events from an older
+        run cannot overwrite whatever is on screen now.
+        """
+        if not hasattr(self, "_run_bar"):
             return
 
         # If a different run is currently active, ignore late events from older runs
-        if self._harness_run_id is not None and self._harness_run_id != run_id:
+        if self._run_bar_run_id is not None and self._run_bar_run_id != run_id:
             return
 
-        if message_code == "completed":
-            self.clear_harness_status(run_id)
+        try:
+            view = run_bar_for(message_code, terminal=terminal)
+        except ValueError:
+            log.debug("unknown run message_code: %s", message_code)
             return
 
-        label_text = _HARNESS_MESSAGES.get(message_code)
-        if label_text is None:
-            log.debug("unknown harness message_code: %s", message_code)
+        if not view.visible:
+            self.clear_run_status(run_id)
             return
 
-        self._harness_run_id = run_id
-        self._harness_label.set_text(label_text)
+        self._run_bar_run_id = run_id
+        self._run_label.set_text(view.text)
 
-        is_active = message_code in {"working", "tool_running", "needs_confirmation"} and not terminal
-        spin = message_code in {"working", "tool_running"} and not terminal
-
-        if spin:
-            self._harness_spinner.start()
+        if view.spinner:
+            self._run_spinner.start()
         else:
-            self._harness_spinner.stop()
+            self._run_spinner.stop()
 
-        if is_active:
-            self._harness_cancel_btn.set_visible(True)
-            self._harness_cancel_btn.set_sensitive(True)
-            self._harness_cancel_btn.set_label("Abbrechen")
+        if view.cancellable:
+            self._run_cancel_btn.set_visible(True)
+            self._run_cancel_btn.set_sensitive(True)
+            self._run_cancel_btn.set_label(CANCEL_TEXT)
         else:
-            self._harness_cancel_btn.set_sensitive(False)
-            self._harness_cancel_btn.set_visible(False)
+            self._run_cancel_btn.set_sensitive(False)
+            self._run_cancel_btn.set_visible(False)
 
-        self._harness_bar.set_visible(True)
+        self._run_bar.set_visible(True)
 
-    def _on_cancel_harness_clicked(self) -> None:
-        target_id = self._harness_run_id
+    def _on_cancel_run_clicked(self) -> None:
+        target_id = self._run_bar_run_id
         if target_id is None:
             return
-        self._harness_cancel_btn.set_sensitive(False)
-        self._harness_cancel_btn.set_label("Abbruch angefordert …")
+        self._run_cancel_btn.set_sensitive(False)
+        self._run_cancel_btn.set_label(CANCEL_PENDING_TEXT)
         app = self.get_application()
         cancel_fn = getattr(app, "cancel_harness", None)
         if callable(cancel_fn):

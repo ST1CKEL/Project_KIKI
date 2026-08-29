@@ -12,6 +12,7 @@ from kiki.config.settings import Settings, save_settings
 from kiki.platform.capabilities import PlatformCapabilities
 from kiki.platform.x11 import request_keep_above, try_get_position, try_move_window
 from kiki.ui.input_region import AlphaRegionCache
+from kiki.ui.menu_model import build_pet_menu
 
 log = logging.getLogger(__name__)
 
@@ -248,32 +249,37 @@ class PetWindow(Gtk.Window):
         gesture.reset()
 
     def _popup_menu(self, x: float, y: float) -> None:
-        menu = Gio.Menu()
-        menu.append("Chat öffnen", "app.chat")
-        menu.append("PC-Steuerung", "app.desktop-control")
-        menu.append("Coding-Session", "app.coding")
-        menu.append("Workspaces", "app.workspaces")
-        menu.append("Bildschirm zeigen", "app.screenshot")
+        # The menu itself is data (`menu_model`), built from session state;
+        # this method only converts it. What the menu holds -- and the
+        # seven-entry bound -- is proven where tests can reach it.
         app = self.get_application()
-        listening = bool(getattr(app, "is_listening", lambda: False)())
-        menu.append("Zuhören beenden" if listening else "Zuhören", "app.voice-toggle")
-        speaking = bool(getattr(app, "is_speaking", lambda: False)())
-        if speaking:
-            menu.append("Sprechen beenden", "app.tts-stop")
-        if self._machine.paused:
-            menu.append("Fortsetzen", "app.resume")
-        else:
-            menu.append("Pausieren", "app.pause")
-        menu.append("Einstellungen", "app.preferences")
-        menu.append("Figur neu laden", "app.reload-character")
-        menu.append("Fenstermenü (Immer im Vordergrund)", "app.window-menu")
-        menu.append("Beenden", "app.quit")
+        menu_def = build_pet_menu(
+            listening=bool(getattr(app, "is_listening", lambda: False)()),
+            speaking=bool(getattr(app, "is_speaking", lambda: False)()),
+            assistant_paused=bool(
+                getattr(app, "assistant_paused", lambda: False)()
+            ),
+            character_paused=self._machine.paused,
+        )
+        menu = self._to_gio_menu(menu_def.items)
         popover = Gtk.PopoverMenu.new_from_model(menu)
         popover.set_parent(self)
         rect = Gdk.Rectangle()
         rect.x, rect.y, rect.width, rect.height = int(x), int(y), 1, 1
         popover.set_pointing_to(rect)
         popover.popup()
+
+    @staticmethod
+    def _to_gio_menu(items) -> Gio.Menu:
+        menu = Gio.Menu()
+        for item in items:
+            if item.hidden:
+                continue
+            if item.children:
+                menu.append_submenu(item.label, PetWindow._to_gio_menu(item.children))
+            else:
+                menu.append(item.label, item.action)
+        return menu
 
     def show_window_menu(self) -> None:
         surface = self.get_surface()

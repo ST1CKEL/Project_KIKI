@@ -13,6 +13,7 @@ htmlcov/
 .kiki-dev/
 xdg-runtime-test/
 vendor/
+.claude
 
 # Secrets and local environment configuration
 .env

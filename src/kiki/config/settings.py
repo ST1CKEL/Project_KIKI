@@ -192,7 +192,9 @@ class ToolsSettings:
     # "strict": the model may read unattended. "balanced": reads plus the
     # declared safety controls. "trusted": additionally opens folders, files,
     # terminal, editor and http(s) links inside registered workspaces.
-    # Writes and external actions always ask, at every level.
+    # "jarvis": acts unattended at every risk level — writes and external
+    # actions included. Opt-in only; the hard deny list, the panic switch and
+    # every spec that withheld auto_allow still bite at this level.
     autonomy: str = "balanced"
     max_steps: int = 6
     max_tool_calls: int = 12
@@ -215,10 +217,29 @@ class WakeSettings:
 
 
 @dataclass
+class ResponsePolicySettings:
+    """What KIKI may read out loud.
+
+    Every default is False: speech is a channel that can be overheard and
+    recorded, so a category is spoken only once it has been switched on
+    deliberately. Nothing here limits *how much* KIKI says -- she speaks the
+    whole answer -- only what is removed from it first.
+    """
+
+    speak_code: bool = False
+    speak_logs: bool = False
+    speak_urls: bool = False
+    speak_paths: bool = False
+    speak_tables: bool = False
+    speak_secrets: bool = False
+
+
+@dataclass
 class VoiceSettings:
     enabled: bool = True
     auto_send: bool = True
     wake: WakeSettings = field(default_factory=WakeSettings)
+    response_policy: ResponsePolicySettings = field(default_factory=ResponsePolicySettings)
 
 
 @dataclass
@@ -382,6 +403,14 @@ class Settings:
                     "cooldown_ms": self.voice.wake.cooldown_ms,
                     "command_timeout_s": self.voice.wake.command_timeout_s,
                 },
+                "response_policy": {
+                    "speak_code": self.voice.response_policy.speak_code,
+                    "speak_logs": self.voice.response_policy.speak_logs,
+                    "speak_urls": self.voice.response_policy.speak_urls,
+                    "speak_paths": self.voice.response_policy.speak_paths,
+                    "speak_tables": self.voice.response_policy.speak_tables,
+                    "speak_secrets": self.voice.response_policy.speak_secrets,
+                },
             },
             "tts": {
                 "enabled": self.tts.enabled,
@@ -532,6 +561,7 @@ def settings_from_mapping(data: dict[str, Any]) -> Settings:
             enabled=bool(voice.get("enabled", True)),
             auto_send=bool(voice.get("auto_send", True)),
             wake=_parse_wake(voice.get("wake") or {}),
+            response_policy=_parse_response_policy(voice.get("response_policy") or {}),
         ),
         tts=TtsSettings(
             enabled=bool(tts.get("enabled", True)),
@@ -613,6 +643,25 @@ def _parse_persona(data: dict[str, Any], ai: dict[str, Any]) -> PersonaSettings:
     return PersonaSettings(
         id=chosen,
         address=" ".join(str(data.get("address", "")).split())[:60],
+    )
+
+
+def _parse_response_policy(data: dict[str, Any]) -> ResponsePolicySettings:
+    """Anything unreadable falls back to not speaking that category.
+
+    Fail closed: a damaged config must not be the reason a secret is read out.
+    """
+
+    def allowed(name: str) -> bool:
+        return data.get(name) is True
+
+    return ResponsePolicySettings(
+        speak_code=allowed("speak_code"),
+        speak_logs=allowed("speak_logs"),
+        speak_urls=allowed("speak_urls"),
+        speak_paths=allowed("speak_paths"),
+        speak_tables=allowed("speak_tables"),
+        speak_secrets=allowed("speak_secrets"),
     )
 
 

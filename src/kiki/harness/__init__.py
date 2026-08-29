@@ -1,67 +1,27 @@
-"""A small, self-contained agent harness: one run, one loop, one read-only tool.
+"""The original agent harness. Superseded, and kept deliberately.
 
 **Not to be confused with `kiki.agents`** (plural), which adapts external coding
-agents like opencode. This package is KIKI's own harness: a controlled
-user-text → model → tool → answer loop with limits, cancellation and a local
-structured trace, deliberately kept out of the UI, voice and production tool
-policy so it can be evaluated on its own.
+agents like opencode.
 
-Nothing here imports GTK, torch, CUDA, a model runtime or the network. The model
-is behind a protocol with fakes only; the real binding comes in a later slice.
+What is still shipped from here:
+
+* `models` -- the run vocabulary (`AgentRun`, `RunStatus`, `ToolCall`,
+  `RunBusyError`, the closed `ERROR_CODES` set). `kiki.assistant` builds on it.
+* `adapter` -- the provider-to-`ModelAction` translation.
+* `confirmation` -- the display record a dialog is handed. It mints nothing;
+  `kiki.tools.confirmation` is the only thing that issues a grant.
+* `notes`, `system_status` -- two tools, as `ToolSpec`s in the production
+  registry.
+* `trace` -- the structured local run trace.
+
+What is no longer reached from the application: `runner` (`AgentRunner`),
+`session` (`HarnessSession`), `tools` (the harness-owned `ToolRegistry`) and
+`gateway_source`. `kiki.assistant.runner` replaced them -- one runner for the
+chat path and the agent path, every tool call through `ToolGateway`.
+
+This module used to re-export the whole surface eagerly. Nothing imported it
+that way, and the re-export was the last edge keeping the superseded runner in
+the application's import graph -- so importing anything from this package
+dragged a thousand lines of dead code along with it. Import the submodule you
+mean instead.
 """
-
-from kiki.harness.confirmation import (
-    ConfirmationError,
-    ConfirmationRequest,
-    PendingConfirmation,
-    fingerprint,
-)
-from kiki.harness.models import (
-    ERROR_CODES,
-    HARNESS_MESSAGE_CODES,
-    ActionKind,
-    AgentRun,
-    CancelToken,
-    HarnessStatusEvent,
-    ModelAction,
-    RunStatus,
-    ToolCall,
-    ToolResult,
-    validate_action,
-)
-from kiki.harness.notes import CreateNoteTool, NotesWorkspace, slugify
-from kiki.harness.runner import AgentRunner, RunBusyError
-from kiki.harness.session import HarnessSession, SessionCallbacks
-from kiki.harness.system_status import SystemStatusTool
-from kiki.harness.tools import Tool, ToolRegistry
-from kiki.harness.trace import TraceRecorder, TraceWriteError
-
-__all__ = [
-    "ERROR_CODES",
-    "HARNESS_MESSAGE_CODES",
-    "ConfirmationError",
-    "ConfirmationRequest",
-    "CreateNoteTool",
-    "HarnessSession",
-    "HarnessStatusEvent",
-    "NotesWorkspace",
-    "PendingConfirmation",
-    "SessionCallbacks",
-    "fingerprint",
-    "slugify",
-    "ActionKind",
-    "AgentRun",
-    "AgentRunner",
-    "CancelToken",
-    "ModelAction",
-    "RunBusyError",
-    "RunStatus",
-    "SystemStatusTool",
-    "Tool",
-    "ToolCall",
-    "ToolRegistry",
-    "ToolResult",
-    "TraceRecorder",
-    "TraceWriteError",
-    "validate_action",
-]

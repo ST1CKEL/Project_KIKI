@@ -35,6 +35,35 @@ def uptime_category(seconds: float) -> str:
     return "long"
 
 
+def spec(*, uptime: Callable[[], float] | None = None) -> Any:
+    """The same tool, as the production registry defines tools.
+
+    Built here rather than in a tools module so the harness keeps owning what
+    its own tool means, while the registry keeps owning who may call it.
+    """
+    from kiki.tools.policy import RiskLevel
+    from kiki.tools.registry import ToolSpec
+
+    tool = SystemStatusTool(uptime=uptime)
+
+    def _handler(params: dict[str, Any]) -> dict[str, Any]:
+        del params
+        return tool.status()
+
+    return ToolSpec(
+        name=SystemStatusTool.name,
+        title="Status",
+        description=SystemStatusTool.description,
+        risk=RiskLevel.READ,
+        parameters=dict(SystemStatusTool.input_schema),
+        handler=_handler,
+        effect="Liest den lokalen Harness-Status.",
+        auto_allow=True,
+        requires_integration=False,
+        model_callable=True,
+    )
+
+
 class SystemStatusTool:
     """`system_status`. Takes no arguments and changes nothing."""
 
@@ -53,6 +82,16 @@ class SystemStatusTool:
         # the clock globally.
         self._uptime = uptime or (lambda: time.monotonic() - _PROCESS_START)
 
+    def status(self) -> dict[str, Any]:
+        """The payload, shared by both the harness path and the ToolSpec."""
+        return {
+            "ok": True,
+            "service": SERVICE,
+            "agent_harness": "available",
+            "harness_version": HARNESS_VERSION,
+            "uptime": uptime_category(self._uptime()),
+        }
+
     async def execute(self, arguments: dict[str, Any]) -> ToolResult:
         del arguments  # the schema already refused anything but {}
         return ToolResult(
@@ -60,11 +99,5 @@ class SystemStatusTool:
             call_id="",
             name=self.name,
             ok=True,
-            data={
-                "ok": True,
-                "service": SERVICE,
-                "agent_harness": "available",
-                "harness_version": HARNESS_VERSION,
-                "uptime": uptime_category(self._uptime()),
-            },
+            data=self.status(),
         )

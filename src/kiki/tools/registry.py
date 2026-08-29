@@ -25,7 +25,12 @@ class ToolSpec:
     requires_integration: bool = True
     allowed_profiles: tuple[str, ...] = ("observe", "develop")
     allowed_in_panic: bool = False
+    # Never written to the audit log, whatever else is configured.
     sensitive_parameters: tuple[str, ...] = ()
+    # The audit allowlist: only these parameter values are stored, and only when
+    # they are short, plain scalars. Everything else is reduced to its shape, so
+    # a tool that forgets to declare anything is safe rather than leaky.
+    audit_parameters: tuple[str, ...] = ()
     # Whether the model may request this tool itself. Default deny: a tool is
     # reachable by the agent loop only when its author opted in explicitly.
     model_callable: bool = False
@@ -40,6 +45,10 @@ class ActionPreview:
     effect: str
     risk: RiskLevel
     reason: str
+    # Stamped by the executor once the broker has armed a request, so a UI can
+    # answer with an id it was given. It is deliberately outside the binding
+    # digest: it names the question, it is not part of what was agreed to.
+    request_id: str = ""
 
 
 class ToolRegistry:

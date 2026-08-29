@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _MIGRATIONS: dict[int, str] = {
     1: """
@@ -163,6 +163,24 @@ _MIGRATIONS: dict[int, str] = {
     ALTER TABLE memories ADD COLUMN updated_at TEXT;
     UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL;
     CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
+    """,
+    7: """
+    CREATE TABLE IF NOT EXISTS routines (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1
+            CHECK (enabled IN (0, 1)),
+        metric TEXT NOT NULL,
+        op TEXT NOT NULL,
+        value REAL NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        cooldown_min INTEGER NOT NULL DEFAULT 30,
+        created_at TEXT NOT NULL,
+        last_fired_at TEXT,
+        fired_count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_routines_enabled ON routines(enabled, metric);
     """,
 }
 

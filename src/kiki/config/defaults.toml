@@ -101,7 +101,10 @@ model_tool_use = true
 #   "balanced" — reading plus the declared safety controls.
 #   "trusted"  — additionally opening folders, files, a terminal, the editor and
 #                http(s) links, and only inside registered workspaces.
-# Writing and external actions always show the approval card, at every level.
+#   "jarvis"   — everything unattended, writes and external actions included.
+#                Opt-in "Jarvis mode". The hard deny list, the panic switch and
+#                every tool that withheld auto_allow still bite at this level.
+# Outside "jarvis", writing and external actions always show the approval card.
 autonomy = "balanced"
 # Hard bounds per turn, so a confused model cannot spin.
 max_steps = 6
@@ -131,24 +134,11 @@ cooldown_ms = 2000
 command_timeout_s = 12
 
 [voice.response_policy]
-# How much of an answer KIKI says out loud. The full answer always stays in the
-# chat; speech is a shortened, safe companion.
-#   silent   — never speak
-#   concise  — default, two sentences
-#   normal   — three sentences
-#   detailed — unlimited, only when detailed_speech is true
-default_mode = "concise"
-
-concise_max_sentences = 2
-concise_max_characters = 300
-
-normal_max_sentences = 3
-normal_max_characters = 500
-
-# Even in "detailed", stay at the normal limits unless this is switched on.
-detailed_speech = false
-
-# Never read these aloud. They stay visible in the chat.
+# What KIKI reads out loud. She always speaks the whole answer — there is no
+# length limit — so this is only about which categories are removed first.
+# Speech can be overheard and recorded, so each one stays off until you switch
+# it on. Everything removed here is still visible in the chat.
+# Set voice.enabled = false to stop KIKI speaking at all.
 speak_code = false
 speak_logs = false
 speak_urls = false

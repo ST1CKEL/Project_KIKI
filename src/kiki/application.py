@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk
@@ -17,6 +18,9 @@ from kiki.character.state_machine import CharacterState, CharacterStateMachine
 from kiki.config.settings import Settings, load_settings, save_settings
 from kiki.harness.confirmation import ConfirmationRequest
 from kiki.harness.models import HarnessStatusEvent
+from kiki.harness.notes import NotesWorkspace
+from kiki.harness.notes import spec as harness_note_spec
+from kiki.harness.system_status import spec as harness_status_spec
 from kiki.integrations.datetime import DateTimeIntegration
 from kiki.integrations.disk import DiskIntegration
 from kiki.integrations.networkmanager import NetworkManagerIntegration
@@ -24,9 +28,16 @@ from kiki.integrations.upower import UPowerIntegration
 from kiki.paths import cache_dir, database_path, icon_search_path, state_dir, user_data_dir
 from kiki.platform.autostart import set_enabled as set_autostart
 from kiki.platform.capabilities import detect_capabilities
+from kiki.routines.engine import RoutineEngine
+from kiki.routines.metrics import IntegrationMetrics
+from kiki.routines.repository import RoutineRepository
+from kiki.routines.service import RoutineService
+from kiki.routines.skill import RoutinesSkill
 from kiki.runners.local import LocalWorkspaceRunner
+from kiki.runtime.activity import ActivityService
 from kiki.runtime.async_bridge import AsyncBridge
 from kiki.runtime.event_bus import EventBus
+from kiki.runtime.pause import AssistantPause
 from kiki.skills.desktop import DesktopPerceptionSkill
 from kiki.skills.registry import SkillRegistry
 from kiki.skills.system_status import SystemStatusSkill
@@ -38,12 +49,20 @@ from kiki.storage.database import Database
 from kiki.storage.memory_repository import MemoryRepository
 from kiki.storage.secrets import create_secret_store
 from kiki.storage.workspace_repository import WorkspaceRepository
+from kiki.tools.app_launch_tools import AppLaunchSkill
+from kiki.tools.audio_tools import AudioControlSkill
 from kiki.tools.audit import AuditLog
+from kiki.tools.display_tools import DisplayControlSkill
 from kiki.tools.executor import ToolExecutor
+from kiki.tools.gateway import ToolGateway
 from kiki.tools.launch_tools import DesktopLaunchSkill
+from kiki.tools.media_tools import MediaControlSkill
 from kiki.tools.memory_tools import MemorySkill
+from kiki.tools.network_tools import NetworkControlSkill
 from kiki.tools.policy import RiskLevel, ToolPolicy
+from kiki.tools.power_tools import PowerControlSkill
 from kiki.tools.registry import ActionPreview, ToolRegistry
+from kiki.tools.session_tools import SessionControlSkill
 from kiki.ui.chat_window import ChatWindow
 from kiki.ui.coding_session_window import CodingSessionWindow
 from kiki.ui.confirmation_dialog import present_confirmation
@@ -53,11 +72,13 @@ from kiki.ui.desktop_control_window import DesktopControlWindow
 from kiki.ui.gi_bootstrap import gi  # noqa: F401  — side-effect import
 from kiki.ui.pet_window import PetWindow
 from kiki.ui.preferences_window import PreferencesWindow
+from kiki.ui.run_bar_model import text_for as run_status_text
 from kiki.ui.workspace_manager_window import WorkspaceManagerWindow
 from kiki.voice.director import SpeechDirector
 from kiki.voice.recorder import AudioRecorder, RecorderError
 from kiki.voice.stt import SpeechError, ensure_vosk_model, transcribe_wav, vosk_model_ready
 from kiki.voice.system_tts import synthesize_system_wav
+from kiki.voice.tts.policy import VoicePolicyConfig, VoiceResponsePolicy
 from kiki.voice.tts_client import TtsError, synthesize_wav
 from kiki.voice.tts_player import PipeWirePlayer
 from kiki.voice.wake import (
@@ -104,6 +125,13 @@ class KikiApplication(Adw.Application):
         self._wake_starting = False
         self._watch: WatchService | None = None
         self._notifier: Notifier | None = None
+        self._routines: RoutineRepository | None = None
+        self._routines_service: RoutineService | None = None
+        # The bounded, content-free view of what KIKI is doing and just did.
+        self._activity = ActivityService()
+        # The assistant pause: no new runs, no routine fires, no notices.
+        # Session state, separate from the character pause and from panic.
+        self._assistant_pause = AssistantPause()
         self._speech: SpeechDirector | None = None
         self._tts_remote_retry_after = 0.0
         self._tts_remote_error = ""
@@ -159,11 +187,50 @@ class KikiApplication(Adw.Application):
         skills.register(DesktopPerceptionSkill())
         skills.register(MemorySkill(memories))
         skills.register(DesktopLaunchSkill(workspaces))
+        skills.register(MediaControlSkill())
+        skills.register(AudioControlSkill())
+        skills.register(DisplayControlSkill())
+        skills.register(AppLaunchSkill())
+        skills.register(SessionControlSkill())
+        skills.register(NetworkControlSkill())
+        skills.register(PowerControlSkill())
+        routines_repo = RoutineRepository(self._db)
+        skills.register(RoutinesSkill(routines_repo, tools))
         skills.install_into(tools)
+        # The harness once carried these two itself. They live here now, so
+        # there is one list of what exists and one policy that gates it.
+        tools.register(harness_status_spec())
+        tools.register(harness_note_spec(NotesWorkspace(user_data_dir() / "notes")))
         executor = ToolExecutor(
             tools, ToolPolicy(self._settings.tools.autonomy), AuditLog(self._db)
         )
         self._executor = executor
+        self._routines = routines_repo
+        # Routine fires go through the same door as everything else: the
+        # gateway's live switches instead of the engine's snapshots, and only
+        # for a recipe the repository holds exactly as confirmed. The engine
+        # itself is untouched -- it asked for an executor, it got one shape,
+        # a stricter one.
+        from kiki.tools.routine_gateway import RoutineToolGateway
+
+        self._routines_service = RoutineService(
+            RoutineEngine(
+                routines_repo,
+                RoutineToolGateway(
+                    ToolGateway(
+                        executor,
+                        panic_check=lambda: self._settings.app.privacy_panic,
+                        integrations_check=self._settings.integrations_active,
+                    ),
+                    routines_repo,
+                    activity=self._activity,
+                    pause=self._assistant_pause,
+                ),
+                IntegrationMetrics(upower, disk).snapshot,
+                panic_check=lambda: self._settings.app.privacy_panic,
+                integrations_check=self._settings.integrations_active,
+            )
+        )
         self._service = ChatService(
             self._settings,
             chats,
@@ -172,6 +239,7 @@ class KikiApplication(Adw.Application):
             executor,
             confirm=self._confirm_model_action,
             memories=memories,
+            trace_dir=state_dir() / "assistant",
         )
         self._pack = ensure_character_pack(self._settings.character.id)
         wav_dir = cache_dir() / "tts"
@@ -187,6 +255,7 @@ class KikiApplication(Adw.Application):
             on_error=self._on_tts_error,
             controller=self._build_voice_controller(),
             use_controller_route=self._settings.tts.use_controller_route,
+            policy=self._voice_policy,
         )
         self._register_actions()
         self._subscribe_ui_event("chat.stream.start", self._on_stream_start)
@@ -201,55 +270,78 @@ class KikiApplication(Adw.Application):
     # --- agent harness ------------------------------------------------------
 
     def _build_harness(self):
-        """The agent harness, or nothing. Never fatal at startup.
+        """The agent path, or nothing. Never fatal at startup.
 
-        Built lazily and defensively: a missing provider, an unwritable notes
-        directory or any import problem leaves KIKI exactly as she was, without
-        the harness.
+        `/agent` is the legacy and developer path since the chat itself runs
+        on the unified runner. It uses the same stack now — step adapter,
+        `AssistantRunner`, `ToolGateway`, `RunService` — so there is no second
+        policy, no second confirmation system and no second executor behind
+        it. Built lazily and defensively: a missing provider, an unusable
+        executor or any import problem leaves KIKI exactly as she was.
         """
         try:
             from kiki.ai.factory import active_model, create_provider
-            from kiki.harness.adapter import ProviderModelAdapter
-            from kiki.harness.notes import CreateNoteTool, NotesWorkspace
-            from kiki.harness.runner import AgentRunner
-            from kiki.harness.session import HarnessSession, SessionCallbacks
-            from kiki.harness.system_status import SystemStatusTool
-            from kiki.harness.tools import ToolRegistry
+            from kiki.assistant import (
+                AssistantRunner,
+                ProviderStepAdapter,
+                RunCallbacks,
+                RunService,
+            )
 
             provider = create_provider(self._settings, self._secrets)
             if not hasattr(provider, "stream_chat_tools"):
-                log.info("harness disabled: the provider cannot call tools")
+                log.info("agent path disabled: the provider cannot call tools")
                 return None
-            registry = ToolRegistry()
-            registry.register(SystemStatusTool())
-            registry.register(CreateNoteTool(NotesWorkspace(user_data_dir() / "notes")))
-            adapter = ProviderModelAdapter(
+            executor = self._executor
+            if executor is None:
+                log.info("agent path disabled: the tool executor is not up yet")
+                return None
+            # Same gateway contract as the chat path: live sources, so the
+            # panic switch reaches an agent run that is already under way.
+            gateway = ToolGateway(
+                executor,
+                panic_check=lambda: self._settings.app.privacy_panic,
+                integrations_check=self._settings.integrations_active,
+            )
+            adapter = ProviderStepAdapter(
                 provider,
                 model=active_model(self._settings),
                 system_prompt=self._settings.compose_prompt(),
+                # The old agent path never set a window and ran on the
+                # provider's 4096 default -- the exact trap the architecture
+                # documents for thinking models. One configuration now.
+                num_ctx=self._settings.ai.ollama.num_ctx,
             )
-            runner = AgentRunner(
+            runner = AssistantRunner(
                 adapter,
-                registry,
-                trace_dir=state_dir() / "harness",
-                on_confirmation_required=self._on_harness_confirmation,
+                gateway,
+                profile="observe",
+                trace_dir=state_dir() / "assistant",
+                max_steps=self._settings.tools.max_steps,
+                max_tool_calls=self._settings.tools.max_tool_calls,
             )
-            session = HarnessSession(
+            service = RunService(
                 runner,
-                SessionCallbacks(
+                RunCallbacks(
                     on_status=self._on_harness_status,
                     on_answer=self._on_harness_answer,
-                    on_confirmation=None,   # routed through the runner callback
+                    on_confirmation=self._on_harness_confirmation,
                     on_speak=self._on_harness_speak,
                 ),
+                paused=self._assistant_pause,
             )
-            self._harness = session
-            return session
+            self._harness = service
+            return service
         except Exception:
-            log.warning("agent harness unavailable", exc_info=False)
+            log.warning("agent path unavailable", exc_info=False)
             return None
 
     def _on_harness_bridge_error(self, _exc: BaseException) -> None:
+        from kiki.assistant import RunPausedError
+
+        if isinstance(_exc, RunPausedError):
+            GLib.idle_add(self._toast, "KIKI macht gerade Pause.")
+            return
         log.warning("harness bridge task failed", exc_info=False)
         GLib.idle_add(self._toast, "KIKI konnte die Aufgabe nicht starten.")
 
@@ -285,33 +377,45 @@ class KikiApplication(Adw.Application):
     # Every callback below arrives on the asyncio thread and hops to GTK, the
     # same way the wake word and the watcher already report.
 
+    def toggle_assistant_pause(self) -> None:
+        """The assistant pause: no new runs, fires or notices.
+
+        Separate from the character pause (an animation) and from panic (a
+        privacy emergency). The active run is left to settle; an open
+        approval card stays answerable; typed chat keeps working, because
+        someone typing is asking, not background work.
+        """
+        paused = self._assistant_pause.toggle()
+        self._activity.record_assistant("paused" if paused else "resumed")
+        if paused:
+            self._toast("KIKI macht Pause. Keine neuen Aufgaben bis zum Fortsetzen.")
+        else:
+            self._toast("KIKI ist wieder bereit.")
+
     def _on_harness_status(self, event: HarnessStatusEvent) -> None:
+        # Runs feed the shared activity view: ids and codes only, never text.
+        self._activity.record_status(event)
         GLib.idle_add(self._apply_harness_status, event)
 
     def _apply_harness_status(self, event: HarnessStatusEvent) -> bool:
         if self._harness is None:
             return False
         try:
-            if self._chat is not None and hasattr(self._chat, "set_harness_status"):
-                self._chat.set_harness_status(
+            if self._chat is not None and hasattr(self._chat, "set_run_status"):
+                self._chat.set_run_status(
                     run_id=event.run_id,
                     message_code=event.message_code,
                     terminal=event.terminal,
                 )
             elif event.message_code != "completed":
-                _FALLBACK = {
-                    "working": "KIKI arbeitet …",
-                    "tool_running": "KIKI führt eine Aufgabe aus …",
-                    "needs_confirmation": "KIKI wartet auf deine Bestätigung.",
-                    "cancelled": "KIKI wurde abgebrochen.",
-                    "failed": "KIKI konnte die Aufgabe nicht ausführen.",
-                    "limit_reached": "KIKI hat die Aufgabe aus Sicherheitsgründen beendet.",
-                }
-                text = _FALLBACK.get(event.message_code)
-                if text:
-                    self._toast(text)
+                # No chat window: the same fixed sentences, from the same
+                # single vocabulary the run bar uses.
+                try:
+                    self._toast(run_status_text(event.message_code))
+                except ValueError:
+                    log.debug("unknown run message_code: %s", event.message_code)
         except Exception:
-            log.warning("harness status could not be delivered")
+            log.warning("run status could not be delivered")
             self._harness_delivery_failed()
         return False
 
@@ -374,9 +478,10 @@ class KikiApplication(Adw.Application):
         return False
 
     def _on_harness_confirmation(self, request: ConfirmationRequest) -> None:
-        session = self._harness
-        if session is not None:
-            session.announce_confirmation(request)
+        # The service has already announced the question (status event and
+        # speech); this callback only puts the card on screen. A failure here
+        # is not survivable silence: the service refuses what nobody can
+        # answer, so nothing runs unasked.
         GLib.idle_add(self._apply_harness_confirmation, request)
 
     def _apply_harness_confirmation(self, request: ConfirmationRequest) -> bool:
@@ -386,18 +491,21 @@ class KikiApplication(Adw.Application):
             return False
         preview = ActionPreview(
             tool=request.tool_name,
-            title="Notiz anlegen",
-            params={"Datei": request.target, "Inhalt": request.content},
+            title=request.title,
+            params={"Datei": request.target},
             target=request.target,
-            effect="Legt eine neue Notiz im KIKI-Notizbereich an.",
+            effect=request.content,
             risk=RiskLevel.WRITE,
-            reason="KIKI hat diese Notiz vorgeschlagen.",
+            reason="KIKI hat diese Aktion vorgeschlagen.",
+            request_id=request.request_id,
         )
 
         def _settle(approved: bool) -> None:
-            # The exact run, call and fingerprint that were on screen.
+            # The exact run and call that were on screen, answered with the id
+            # this dialog was handed. The dialog computes no authorisation of
+            # its own; the broker behind the gateway mints the grant.
             if approved:
-                session.confirm(request.run_id, request.call_id, request.fingerprint)
+                session.confirm(request.run_id, request.call_id, request.request_id)
             else:
                 session.reject(request.run_id, request.call_id)
 
@@ -409,8 +517,28 @@ class KikiApplication(Adw.Application):
         session, self._harness = self._harness, None
         if session is not None:
             session.shutdown()
-        if self._chat is not None and hasattr(self._chat, "clear_harness_status"):
-            self._chat.clear_harness_status()
+        if self._chat is not None and hasattr(self._chat, "clear_run_status"):
+            self._chat.clear_run_status()
+
+    def _voice_policy(self) -> VoiceResponsePolicy:
+        """What KIKI may read out loud, from the user's own config.
+
+        Built here rather than left to the director's defaults so the settings
+        file actually governs speech. Passed to the director uncalled, so it is
+        re-read per utterance: a category switched off in preferences applies to
+        the answer already being spoken, not only after a restart.
+        """
+        chosen = self._settings.voice.response_policy
+        return VoiceResponsePolicy(
+            VoicePolicyConfig(
+                speak_code=chosen.speak_code,
+                speak_logs=chosen.speak_logs,
+                speak_urls=chosen.speak_urls,
+                speak_paths=chosen.speak_paths,
+                speak_tables=chosen.speak_tables,
+                speak_secrets=chosen.speak_secrets,
+            )
+        )
 
     def _build_voice_controller(self):
         """The opt-in route, built only when the flag asks for it.
@@ -511,6 +639,7 @@ class KikiApplication(Adw.Application):
         _add("chat", lambda *_: self.open_chat())
         _add("pause", lambda *_: self._machine.pause())
         _add("resume", lambda *_: self._machine.resume())
+        _add("assistant-pause-toggle", lambda *_: self.toggle_assistant_pause())
         _add("preferences", lambda *_: self.open_preferences())
         _add("reload-character", lambda *_: self.reload_character())
         _add("window-menu", lambda *_: self._pet.show_window_menu() if self._pet else None)
@@ -546,6 +675,7 @@ class KikiApplication(Adw.Application):
             self._machine.set(CharacterState.GREET)
         self._sync_wake()
         self._sync_watch()
+        self._sync_routines()
 
     def _show_missing_assets(self) -> None:
         win = Adw.ApplicationWindow(application=self, title=APP_NAME)
@@ -590,6 +720,7 @@ class KikiApplication(Adw.Application):
                 on_change=self._apply_settings,
                 on_tts_test=self.test_tts_voice,
                 memories=self._memories,
+                routines=self._routines,
             )
             parent = self._chat if (self._chat and self._chat.is_visible()) else self._pet
             dialog.present(parent)
@@ -693,6 +824,7 @@ class KikiApplication(Adw.Application):
         # Covers the panic switch too: voice_allowed() folds it in.
         self._sync_wake()
         self._sync_watch()
+        self._sync_routines()
 
     def reload_character(self) -> None:
         pack = ensure_character_pack(self._settings.character.id)
@@ -716,6 +848,9 @@ class KikiApplication(Adw.Application):
     def is_speaking(self) -> bool:
         return bool(self._speech and self._speech.active)
 
+    def assistant_paused(self) -> bool:
+        return self._assistant_pause.paused
+
     def stop_speech(self) -> None:
         if self._speech is not None:
             self._speech.stop()
@@ -735,8 +870,24 @@ class KikiApplication(Adw.Application):
             log.info("%s", text)
             self.notify_status("KIKI", text)
 
-    async def _confirm_model_action(self, preview: ActionPreview) -> bool:
-        """Approval card for a tool KIKI asked for herself. Runs on the asyncio thread."""
+    async def _confirm_model_action(self, request: ConfirmationRequest) -> bool:
+        """Approval card for a tool KIKI asked for herself. Runs on the asyncio thread.
+
+        The card is built from the display record the runner armed; the answer
+        that comes back is a verdict, not an authorisation. The service spends
+        it through the request id, and the broker behind the gateway decides
+        whether it still buys anything.
+        """
+        preview = ActionPreview(
+            tool=request.tool_name,
+            title=request.title,
+            params={"Ziel": request.target},
+            target=request.target,
+            effect=request.content,
+            risk=RiskLevel.WRITE,
+            reason="KIKI hat diese Aktion vorgeschlagen.",
+            request_id=request.request_id,
+        )
 
         def _present(settle) -> None:
             present_confirmation(self._chat or self._pet, preview, settle)
@@ -893,6 +1044,11 @@ class KikiApplication(Adw.Application):
         notifier = self._notifier
         if notifier is None:
             return False
+        if self._assistant_pause.paused:
+            # A paused assistant does not speak up. The watcher's condition
+            # will re-evaluate on a later tick once she is resumed.
+            log.debug("notice %s suppressed: assistant paused", notice.key)
+            return False
         delivery = notifier.decide(
             notice,
             panic=self._settings.app.privacy_panic,
@@ -902,6 +1058,9 @@ class KikiApplication(Adw.Application):
             log.debug("notice %s suppressed: %s", notice.key, delivery.reason)
             return False
         log.info("notice %s delivered (speak=%s)", notice.key, delivery.speak)
+        # What the user actually saw becomes activity; suppressed notices
+        # were not delivered and are not part of what happened on screen.
+        self._activity.record_notice(key=notice.key, severity=notice.severity.value)
         self.notify_status(notice.title, notice.detail or notice.spoken)
         if self._machine.state not in {CharacterState.PAUSED, CharacterState.LISTENING}:
             self._machine.set(CharacterState.NOTIFICATION)
@@ -918,6 +1077,14 @@ class KikiApplication(Adw.Application):
         # starting once the app is up.
         if not self._watch.running:
             self._watch.start(self._bridge)
+
+    def _sync_routines(self) -> None:
+        if self._routines_service is None:
+            return
+        # The engine re-reads panic and integration flags on every tick;
+        # only the loop needs starting once the app is up.
+        if not self._routines_service.running:
+            self._routines_service.start(self._bridge)
 
     # --- Wake word -------------------------------------------------------
 
@@ -1006,7 +1173,8 @@ class KikiApplication(Adw.Application):
             self._chat.set_listening(False)
         if self._machine.state is CharacterState.LISTENING:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
-        self._route_spoken_text(text)
+        # One captured command is one spoken event, minted at the source.
+        self._route_spoken_text(text, correlation_id=f"wake-{uuid.uuid4().hex[:12]}")
         return False
 
     def _stop_voice(self, *, discard: bool) -> None:
@@ -1028,16 +1196,30 @@ class KikiApplication(Adw.Application):
         async def _run():
             return await asyncio.to_thread(transcribe_wav, path)
 
-        self._bridge.submit(_run(), on_success=self._on_transcript, on_error=self._voice_failed)
+        # One recording is one spoken event: the id is minted where the event
+        # is born and travels with its transcript, so a delivery that fires
+        # twice can never start two runs for one utterance.
+        take_id = f"take-{uuid.uuid4().hex[:12]}"
+        self._bridge.submit(
+            _run(),
+            on_success=lambda text: self._on_transcript(text, take_id),
+            on_error=self._voice_failed,
+        )
 
-    def _on_transcript(self, text: str) -> None:
+    def _on_transcript(self, text: str, correlation_id: str = "") -> None:
         self._voice_busy = False
         if self._machine.state is CharacterState.THINKING:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
-        self._route_spoken_text(text)
+        self._route_spoken_text(text, correlation_id=correlation_id)
 
-    def _route_spoken_text(self, text: str) -> None:
-        """One path for recognized speech, whether push-to-talk or wake word."""
+    def _route_spoken_text(self, text: str, *, correlation_id: str = "") -> None:
+        """One path for recognized speech, whether push-to-talk or wake word.
+
+        One spoken event becomes exactly one run: the correlation id binds the
+        utterance to its run and refuses a second delivery of the same event.
+        With `voice.auto_send` off, the person reviews first -- the text lands
+        in the input box and nothing runs until Enter.
+        """
         if not text.strip():
             self._toast("Nichts verstanden. Bitte nochmal.")
             return
@@ -1045,10 +1227,49 @@ class KikiApplication(Adw.Application):
             self.open_desktop_control()
             self._toast("PC-Steuerung geöffnet. Aktionen brauchen weiterhin einen Klick und Freigabe.")
             return
-        self.open_chat()
-        if self._chat is None:
+        if not self._settings.voice.auto_send:
+            self.open_chat()
+            if self._chat is not None:
+                self._chat.submit_transcript(text.strip(), send=False)
             return
-        self._chat.submit_transcript(text.strip(), send=self._settings.voice.auto_send)
+        if self._assistant_pause.paused:
+            # Spoken to, but paused: the toast alone would be invisible to
+            # someone talking. Say it, once, and drop the utterance.
+            self._toast("KIKI macht gerade Pause.")
+            self._say_paused()
+            return
+        service = self._harness or self._build_harness()
+        if service is None:
+            # No run service (no tool-capable provider): the chat still
+            # answers, voice does not die with the agent path.
+            self.open_chat()
+            if self._chat is not None:
+                self._chat.submit_transcript(text.strip(), send=True)
+            return
+        if service.busy:
+            self._toast("KIKI arbeitet noch an der letzten Aufgabe.")
+            return
+        self._bridge.submit(
+            service.ask(text.strip(), correlation_id=correlation_id),
+            on_error=self._on_voice_run_error,
+        )
+
+    def _on_voice_run_error(self, exc: BaseException) -> None:
+        from kiki.assistant import DuplicateCorrelationError, RunPausedError
+
+        if isinstance(exc, DuplicateCorrelationError):
+            # The same utterance already has its run. Silence is correct:
+            # a second toast or answer would be the duplicate, not this.
+            log.info("duplicate spoken event dropped")
+            return
+        if isinstance(exc, RunPausedError):
+            self._say_paused()
+            return
+        self._on_harness_bridge_error(exc)
+
+    def _say_paused(self) -> None:
+        if self._settings.tts_allowed() and self._speech is not None:
+            self._speech.say("Ich mache gerade Pause. Bitte später nochmal.")
 
     def _voice_failed(self, exc: BaseException) -> None:
         self._voice_busy = False
@@ -1178,6 +1399,8 @@ class KikiApplication(Adw.Application):
         self._stop_wake()
         if self._watch is not None:
             self._watch.stop()
+        if self._routines_service is not None:
+            self._routines_service.stop()
         if self._recorder.recording:
             self._recorder.stop()
         if self._pet is not None:

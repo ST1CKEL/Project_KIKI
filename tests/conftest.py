@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,13 @@ from kiki.tools.audit import AuditLog
 from kiki.tools.executor import ToolExecutor
 from kiki.tools.policy import ToolPolicy
 from kiki.tools.registry import ToolRegistry
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _hermetic_state_home(tmp_path_factory) -> None:
+    """Chat turns write run traces under XDG state. Keep the suite out of the
+    user's real home; a test that sets the variable itself still wins."""
+    os.environ.setdefault("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))
 
 
 @pytest.fixture

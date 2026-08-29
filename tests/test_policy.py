@@ -3,7 +3,13 @@ from __future__ import annotations
 import asyncio
 
 from kiki.tools.agent_tools import agent_plan_spec, agent_start_spec, agent_stop_spec
-from kiki.tools.policy import DecisionKind, RiskLevel, ToolPolicy
+from kiki.tools.policy import (
+    AutonomyLevel,
+    DecisionKind,
+    Origin,
+    RiskLevel,
+    ToolPolicy,
+)
 from kiki.tools.registry import ToolSpec
 from kiki.tools.test_tools import tests_run_profile_spec as run_profile_tool
 
@@ -69,6 +75,77 @@ def test_write_requires_confirm() -> None:
         integrations_enabled=True,
     )
     assert decision.kind is DecisionKind.CONFIRM
+
+
+def test_jarvis_allows_write_and_external_unattended() -> None:
+    policy = ToolPolicy(AutonomyLevel.JARVIS.value)
+    for risk in (RiskLevel.WRITE, RiskLevel.EXTERNAL):
+        decision = policy.evaluate(
+            name=f"do_{risk.value}",
+            params={},
+            spec=_spec(name=f"do_{risk.value}", risk=risk, auto_allow=True, model_callable=True),
+            panic=False,
+            integrations_enabled=True,
+            origin=Origin.MODEL,
+        )
+        assert decision.kind is DecisionKind.ALLOW
+
+
+def test_jarvis_still_confirms_when_author_withheld_auto_allow() -> None:
+    # The spec author's veto outranks every autonomy level, jarvis included.
+    decision = ToolPolicy(AutonomyLevel.JARVIS.value).evaluate(
+        name="memory_remember",
+        params={},
+        spec=_spec(
+            name="memory_remember", risk=RiskLevel.WRITE, auto_allow=False, model_callable=True
+        ),
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.MODEL,
+    )
+    assert decision.kind is DecisionKind.CONFIRM
+
+
+def test_jarvis_still_denies_hard_deny_and_panic() -> None:
+    policy = ToolPolicy(AutonomyLevel.JARVIS.value)
+    denied = policy.evaluate(
+        name="run_shell",
+        params={},
+        spec=_spec(name="run_shell", risk=RiskLevel.READ, auto_allow=True, model_callable=True),
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.MODEL,
+    )
+    assert denied.kind is DecisionKind.DENY
+    panicked = policy.evaluate(
+        name="status_disk",
+        params={},
+        spec=_spec(),
+        panic=True,
+        integrations_enabled=True,
+        origin=Origin.MODEL,
+    )
+    assert panicked.kind is DecisionKind.DENY
+
+
+def test_jarvis_leaves_user_origin_unchanged() -> None:
+    # A clicked WRITE action still asks, even in jarvis mode: the level widens
+    # what the *model* may decide, not what a button click skips.
+    decision = ToolPolicy(AutonomyLevel.JARVIS.value).evaluate(
+        name="restart_service",
+        params={},
+        spec=_spec(name="restart_service", risk=RiskLevel.WRITE, auto_allow=True),
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.USER,
+    )
+    assert decision.kind is DecisionKind.CONFIRM
+
+
+def test_coerce_recognises_jarvis() -> None:
+    assert ToolPolicy(" jarvis ").autonomy is AutonomyLevel.JARVIS
+    # Unreadable values still fail closed, jarvis included in the valid set.
+    assert ToolPolicy("jarvis!").autonomy is AutonomyLevel.STRICT
 
 
 def test_panic_denies_even_reads() -> None:

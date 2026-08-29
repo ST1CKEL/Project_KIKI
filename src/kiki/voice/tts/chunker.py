@@ -159,13 +159,7 @@ class StreamingChunker:
 
     def _clean(self, raw: str) -> str:
         """Strip anything the policy forbids, then tidy for speech."""
-        plan = self._policy.plan(raw, mode=None)
-        if plan.text:
-            return plan.text
-        # The policy also caps length; for a chunk we only need its redaction,
-        # so fall back to tidying when the cap emptied it.
-        cleaned, _removed = self._policy._redact(raw)
-        return VoiceResponsePolicy._tidy(cleaned)
+        return self._policy.redact_chunk(raw)
 
     def _target(self) -> int:
         return (

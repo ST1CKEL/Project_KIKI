@@ -16,6 +16,7 @@ from kiki.voice.tts.models import (
     TTSGenerationResult,
     TTSRequest,
 )
+from kiki.voice.tts.policy import VoiceResponsePolicy
 from kiki.voice.tts_client import TtsError
 from kiki.voice.tts_text import flush_buffer, speakable, split_ready
 
@@ -50,6 +51,21 @@ class ControllerLike(Protocol):
     async def speak(self, request: TTSRequest) -> TTSGenerationResult: ...
 
     async def interrupt(self) -> bool: ...
+
+
+PolicySource = VoiceResponsePolicy | Callable[[], VoiceResponsePolicy]
+
+
+def _as_policy_source(
+    policy: PolicySource | None,
+) -> Callable[[], VoiceResponsePolicy]:
+    """Accept a policy or a way to get one; always return a way to get one."""
+    if policy is None:
+        settled = VoiceResponsePolicy()
+        return lambda: settled
+    if callable(policy):
+        return policy
+    return lambda: policy
 
 
 SubmitFn = Callable[..., CancelHandle | None]
@@ -114,8 +130,17 @@ class SpeechDirector:
         service_down: Callable[[BaseException], bool] | None = None,
         controller: ControllerLike | None = None,
         use_controller_route: bool = False,
+        policy: PolicySource | None = None,
     ) -> None:
         self._synthesize = synthesize
+        # What may be said out loud. The WAV route used to have none, so a
+        # secret or a home path in an answer was read aloud.
+        #
+        # Held as a source rather than a value: a tightened setting must reach
+        # an answer that is already being spoken, the same way the panic switch
+        # reaches a tool call that is already under way. Loosening it live is
+        # the same mechanism; the point is that the switch is never stale.
+        self._policy_source = _as_policy_source(policy)
         self._player = player
         self._submit = submit
         self._wav_dir = wav_dir
@@ -150,6 +175,15 @@ class SpeechDirector:
         # already announced. A late event for any other id is dropped.
         self._route_request_id: str | None = None
         self._route_announced = False
+
+    @property
+    def _policy(self) -> VoiceResponsePolicy:
+        """The rule as it stands right now, not as it stood at startup.
+
+        Cheap on purpose: the source is an attribute read, so resolving it
+        inside the queue lock costs nothing and cannot deadlock.
+        """
+        return self._policy_source()
 
     def audio_started(self, event: AudioStartedEvent) -> None:
         """The controller reports that the first chunk is going to the speakers.
@@ -215,9 +249,20 @@ class SpeechDirector:
             if chunks:
                 self._spoke_anything = True
             for chunk in chunks:
-                self._synth_queue.append(chunk)
+                self._enqueue_locked(chunk)
             jobs = self._arm_locked()
         self._dispatch(jobs)
+
+    def _enqueue_locked(self, text: str) -> None:
+        """The one way into the speech queue.
+
+        Redaction sits here rather than at the four call sites so a new caller
+        cannot forget it -- the same reason the audit sanitises in its sink.
+        Caller holds `self._lock`.
+        """
+        spoken = self._policy.redact_chunk(text)
+        if spoken:
+            self._synth_queue.append(spoken)
 
     def say(self, text: str) -> None:
         """Speak a complete utterance (prefs test, greet)."""
@@ -228,7 +273,7 @@ class SpeechDirector:
         with self._lock:
             self._stream_open = False
             self._active = True
-            self._synth_queue.append(spoken)
+            self._enqueue_locked(spoken)
             jobs = self._arm_locked()
         self._dispatch(jobs)
 
@@ -238,7 +283,7 @@ class SpeechDirector:
             self._buffer = ""
             self._stream_open = False
             if leftover:
-                self._synth_queue.append(leftover)
+                self._enqueue_locked(leftover)
             jobs = self._arm_locked()
             idle = self._maybe_idle_locked()
         self._dispatch(jobs)

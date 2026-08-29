@@ -56,6 +56,9 @@ class Origin(StrEnum):
 
     USER = "user"
     MODEL = "model"
+    # A stored routine firing in the background. The recipe — tool, arguments,
+    # trigger — was confirmed by a human when it was created; see kiki/routines.
+    ROUTINE = "routine"
 
 
 class AutonomyLevel(StrEnum):
@@ -64,18 +67,33 @@ class AutonomyLevel(StrEnum):
     STRICT = "strict"
     BALANCED = "balanced"
     TRUSTED = "trusted"
+    # Opt-in "Jarvis" mode: the user explicitly accepted that KIKI acts
+    # unattended at every risk level, writes and external actions included.
+    # It is never a default. What still stops a call down here: the hard deny
+    # list, unknown tools, the panic switch, the integration lockout — and
+    # every spec whose author withheld `auto_allow`.
+    JARVIS = "jarvis"
 
 
 VALID_AUTONOMY: tuple[str, ...] = tuple(level.value for level in AutonomyLevel)
 
-# Risk tiers a model may trigger unattended, per level. Everything else still
-# reaches the approval card. WRITE and EXTERNAL are absent from every level on
-# purpose: changing data and leaving the machine always need a human.
+# Risk tiers a model-initiated call may trigger unattended, per level. WRITE and
+# EXTERNAL appear in exactly one place: JARVIS, an explicitly chosen mode.
+# Everywhere else, changing data and leaving the machine need a human.
 _UNATTENDED: dict[AutonomyLevel, frozenset[RiskLevel]] = {
     AutonomyLevel.STRICT: frozenset({RiskLevel.READ}),
     AutonomyLevel.BALANCED: frozenset({RiskLevel.READ, RiskLevel.CONTROL}),
     AutonomyLevel.TRUSTED: frozenset(
         {RiskLevel.READ, RiskLevel.CONTROL, RiskLevel.LAUNCH}
+    ),
+    AutonomyLevel.JARVIS: frozenset(
+        {
+            RiskLevel.READ,
+            RiskLevel.CONTROL,
+            RiskLevel.LAUNCH,
+            RiskLevel.WRITE,
+            RiskLevel.EXTERNAL,
+        }
     ),
 }
 
@@ -136,6 +154,23 @@ class ToolPolicy:
                 kind=DecisionKind.DENY,
                 reason=f"Ungültige Parameter: {exc}",
                 risk=spec.risk,
+            )
+        if origin is Origin.ROUTINE:
+            # The recipe behind this call was confirmed by a human when the
+            # routine was created. What still has to hold: the tool's author
+            # allowed unattended runs at all. Nobody can answer a card here.
+            if not spec.auto_allow:
+                return PolicyDecision(
+                    kind=DecisionKind.DENY,
+                    reason="Dieses Werkzeug ist nicht routinenfähig.",
+                    risk=spec.risk,
+                    params=cleaned,
+                )
+            return PolicyDecision(
+                kind=DecisionKind.ALLOW,
+                reason="Freigegebene Routine — Rezept wurde bei der Erstellung bestätigt.",
+                risk=spec.risk,
+                params=cleaned,
             )
         if not spec.auto_allow:
             # The spec author withheld unattended execution; no level overrides it.

@@ -131,6 +131,17 @@ class ToolCall:
     id: str = field(default_factory=lambda: _new_id("call"))
 
 
+class RunBusyError(Exception):
+    """A run is already active. The active one is untouched.
+
+    Lives here rather than beside a runner: both the unified runner and the
+    legacy one raise it, and a shared error should not make one package depend
+    on the other's implementation.
+    """
+
+    error_code = "run_busy"
+
+
 @dataclass(frozen=True)
 class ToolResult:
     """Always tied to a call that really happened.

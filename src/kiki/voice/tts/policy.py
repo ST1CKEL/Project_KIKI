@@ -168,6 +168,23 @@ class VoiceResponsePolicy:
         plan.truncated = truncated
         return plan
 
+    def redact_chunk(self, raw: str) -> str:
+        """Everything the policy forbids, removed, then tidied for speech.
+
+        For one chunk of a longer answer, so the length cap is deliberately not
+        applied: the cap is about a whole answer, and a chunk the cap emptied
+        would silently swallow speech that was allowed.
+
+        Both voice routes go through here. Redaction that only one route
+        applies is redaction that depends on a config flag to protect anything.
+
+        `plan()` is deliberately not used: it also caps length, and a cap
+        applied per chunk truncates every chunk of a streamed answer rather
+        than the answer as a whole.
+        """
+        cleaned, _removed = self._redact(raw)
+        return self._tidy(cleaned)
+
     def _redact(self, text: str) -> tuple[str, list[str]]:
         removed: list[str] = []
         out = text
