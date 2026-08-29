@@ -75,9 +75,9 @@ KIKI reagiert visuell in Echtzeit auf das Gespräch, Systemzustände und Agent-A
 
 ---
 
-## 🤖 Agentic Desktop-Assistenz (`/agent`)
+## 🤖 Agentic Desktop-Assistenz
 
-KIKI verfügt über ein dediziertes **Harness-Subsystem** (`kiki.harness`) für kontrollierte, transparente und nachvollziehbare Agenten-Aufgaben direkt auf deinem Desktop:
+KIKI verwendet einen gemeinsamen **Assistant-Core** (`kiki.assistant`) für normalen Chat mit Modell-Werkzeugen und für den expliziten `/agent`-Entwicklerpfad. Dadurch laufen alle Agenten-Aufgaben kontrolliert, transparent und nachvollziehbar über denselben Sicherheitsweg:
 
 ```text
 /agent erstelle eine Notiz mit "Projekt-Meilensteine prüfen"
@@ -93,12 +93,14 @@ KIKI verfügt über ein dediziertes **Harness-Subsystem** (`kiki.harness`) für 
 
 </div>
 
-### Kernfunktionen des Harness:
-1. **Eindeutiges Befehls-Routing:** Eingaben mit `/agent <Aufgabe>` werden strikt isoliert vom regulären Chat an den Agent-Runner übergeben.
-2. **Run-gebundener Statusbalken:** Während der Ausführung erscheint im Chatfenster ein kompakter Statusbalken mit Spinner und **`[Abbrechen]`-Button**.
-3. **Sicherheit & Bestätigungsdialog bei Seiteneffekten:** Schreibende Aktionen (wie `create_note`) verlangen vor dem Schreiben eine interaktive Genehmigung mit Inhaltsvorschau.
-4. **Stabile Run-Identität (`run_id`):** Jeder Agenten-Lauf besitzt eine eindeutige UUID. Verspätete Callbacks oder alte Events können die aktuelle UI-Anzeige nicht verfälschen.
-5. **Revisionssichere Notizenablage:** Notizen werden unter `~/.local/share/kiki/notes/` abgelegt.
+### Kernfunktionen des Assistant-Cores:
+
+1. **Ein gemeinsamer Runner:** Chat und `/agent` verwenden denselben `AssistantRunner` für Streaming, Werkzeugschritte, Limits und Abbruch.
+2. **Ein gemeinsamer Sicherheitsweg:** Jeder Werkzeugaufruf läuft über `ToolGateway`, `ToolPolicy`, Bestätigungsbroker und Audit. Panic- und Integrationsstatus werden unmittelbar vor einem Seiteneffekt erneut geprüft.
+3. **Run-gebundener Statusbalken:** Während der Ausführung erscheint im Chatfenster ein kompakter Statusbalken mit Spinner und **`[Abbrechen]`-Button**.
+4. **Sichere Bestätigung:** Schreibende und externe Aktionen verlangen außerhalb des expliziten Jarvis-Modus eine interaktive Genehmigung. Freigaben sind einmalig an Run, Tool-Aufruf, validierte Argumente und angezeigte Vorschau gebunden.
+5. **Stabile Run-Identität (`run_id`):** Verspätete Callbacks, Freigaben oder Events eines alten Laufs können keinen aktuellen Lauf verändern.
+6. **Harte Laufgrenzen:** Schrittzahl, Werkzeugaufrufe und Wiederholungen sind begrenzt; Protokollfehler enden sichtbar statt mit einer unvollständigen Antwort.
 
 ---
 
@@ -123,9 +125,10 @@ flowchart TD
     subgraph Core ["KIKI Core Engine (asyncio Thread)"]
         EventBus["📢 EventBus"]
         ChatService["🧠 ChatService (Gespräche & Streaming)"]
-        HarnessSession["🤖 HarnessSession (Run-Lifecycle)"]
-        AgentRunner["⚙️ AgentRunner (Step Driver)"]
-        ToolRegistry["🔧 ToolRegistry (system_status, create_note)"]
+        RunService["🤖 RunService (Run-Lifecycle)"]
+        AssistantRunner["⚙️ AssistantRunner (Chat + /agent)"]
+        ToolGateway["🛡️ ToolGateway (Policy, Confirm, Audit)"]
+        ToolRegistry["🔧 ToolRegistry (Allowlist)"]
         StateMachine["🎭 Character State Machine"]
         SpeechDirector["🎙️ Speech Director (Audio Controller)"]
     end
@@ -138,21 +141,22 @@ flowchart TD
         SQLiteDB["🗄️ SQLite WAL & Notes Workspace"]
     end
 
-    ChatWindow -->|/agent Task| AsyncBridge
-    ChatWindow -->|Chat| AsyncBridge
+    ChatWindow -->|Chat oder /agent| AsyncBridge
     ConfirmDialog --> AsyncBridge
     PetWindow --> AsyncBridge
     CodeWindow --> AsyncBridge
     SettingsDialog --> AsyncBridge
 
-    AsyncBridge <--> HarnessSession
+    AsyncBridge <--> RunService
     AsyncBridge <--> ChatService
     AsyncBridge <--> StateMachine
     AsyncBridge <--> SpeechDirector
 
-    HarnessSession --> AgentRunner
-    AgentRunner --> ToolRegistry
-    AgentRunner --> Ollama
+    RunService --> AssistantRunner
+    ChatService --> AssistantRunner
+    AssistantRunner --> ToolGateway
+    ToolGateway --> ToolRegistry
+    AssistantRunner --> Ollama
 
     ChatService --> Ollama
     ChatService --> SQLiteDB
@@ -314,7 +318,7 @@ Ausführliche Latenzanalysen und Architekturdetails: [docs/VOICE_SUBSYSTEM.md](d
 
 ## 🧪 Entwicklung & Tests
 
-Die Testsuite umfasst über **1.320 automatisierte Tests** für alle Schichten (Harness, Audio-Pipeline, UI-Event-Handling, Storage, Tool-Policy und Workspaces):
+Die Testsuite umfasst **1.550 automatisierte Testfälle** für alle Schichten (Assistant-Core, Audio-Pipeline, UI-Event-Handling, Storage, Tool-Policy und Workspaces):
 
 ```bash
 # Alle Tests ausführen
