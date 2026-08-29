@@ -69,3 +69,4 @@ huggingface/
 *.swp
 *~
 .DS_Store
+.zcode/
