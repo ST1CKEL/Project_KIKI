@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from gi.repository import Gdk, Gtk
-
 from kiki.text.markdown import CodeBlock
+from kiki.ui.gi_bootstrap import Gdk, GLib, Gtk
 
 
 class CodeBlockWidget(Gtk.Box):
@@ -52,8 +51,6 @@ class CodeBlockWidget(Gtk.Box):
         def _reset() -> bool:
             _button.set_label("Kopieren")
             return False
-
-        from gi.repository import GLib
 
         GLib.timeout_add(1200, _reset)
         # Gdk imported so type checkers keep the clipboard path honest.

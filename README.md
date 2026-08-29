@@ -318,7 +318,7 @@ Ausführliche Latenzanalysen und Architekturdetails: [docs/VOICE_SUBSYSTEM.md](d
 
 ## 🧪 Entwicklung & Tests
 
-Die Testsuite umfasst **1.550 automatisierte Testfälle** für alle Schichten (Assistant-Core, Audio-Pipeline, UI-Event-Handling, Storage, Tool-Policy und Workspaces):
+Die Testsuite umfasst **mehr als 1.500 automatisierte Testfälle** für alle Schichten (Assistant-Core, Audio-Pipeline, UI-Event-Handling, Storage, Tool-Policy und Workspaces):
 
 ```bash
 # Alle Tests ausführen

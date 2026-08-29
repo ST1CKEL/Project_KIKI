@@ -3,13 +3,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
-
 from kiki.ai.chat_service import ChatService, StreamEvent
 from kiki.ai.vision import VisionEncodeError, encode_image_file
 from kiki.config.settings import Settings
 from kiki.runtime.async_bridge import AsyncBridge, StreamHandle
 from kiki.storage.chat_repository import ChatRepository, Conversation
+from kiki.ui.gi_bootstrap import Adw, Gdk, Gio, GLib, Gtk, Pango
 from kiki.ui.run_bar_model import CANCEL_PENDING_TEXT, CANCEL_TEXT, run_bar_for
 from kiki.ui.widgets.chat_bubble import ChatBubble
 

@@ -56,7 +56,7 @@ python3 -m kiki
 
 ## 3. Testsuite & Qualitätssicherung
 
-Die Testsuite deckt alle Komponenten mit mehr als 720 Unit- und Integrationstests ab.
+Die Testsuite deckt alle Komponenten mit mehr als 1.500 Unit- und Integrationstests ab.
 
 ```bash
 # Alle Tests ausführen

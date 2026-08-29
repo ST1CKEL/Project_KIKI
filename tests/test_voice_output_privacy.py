@@ -174,6 +174,13 @@ def test_the_director_holds_a_policy_by_default(tmp_path) -> None:
     assert isinstance(_director(tmp_path)._policy, VoiceResponsePolicy)
 
 
+def test_a_submitter_that_declines_the_job_leaves_no_phantom_activity(tmp_path) -> None:
+    """None means no ownership transfer: the coroutine is closed and rolled back."""
+    director = _director(tmp_path)
+    director.say("Ein kurzer Satz.")
+    assert director.active is False
+
+
 # -- no speech length cap (decided) -------------------------------------------
 
 

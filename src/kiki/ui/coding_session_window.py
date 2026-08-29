@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
-
 from kiki.agents.models import AgentError, AgentEventType, AgentSession
 from kiki.agents.session_service import SessionService
 from kiki.config.settings import Settings
@@ -21,6 +19,7 @@ from kiki.tools.workspace_tools import (
     workspace_open_file_spec,
     workspace_open_spec,
 )
+from kiki.ui.gi_bootstrap import Adw, Gdk, Gio, GLib, Gtk, Pango
 from kiki.ui.widgets.agent_output_view import AgentOutputView, MonoText
 from kiki.ui.widgets.approval_card import ApprovalCard
 from kiki.ui.widgets.diff_view import DiffView

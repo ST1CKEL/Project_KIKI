@@ -3,14 +3,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from gi.repository import Gdk, GdkPixbuf, Gio, Graphene, Gtk
-
 from kiki.character.animation_engine import AnimationEngine
 from kiki.character.assets import CharacterPack
 from kiki.character.state_machine import CharacterState, CharacterStateMachine
 from kiki.config.settings import Settings, save_settings
 from kiki.platform.capabilities import PlatformCapabilities
 from kiki.platform.x11 import request_keep_above, try_get_position, try_move_window
+from kiki.ui.gi_bootstrap import Gdk, GdkPixbuf, Gio, Graphene, Gtk
 from kiki.ui.input_region import AlphaRegionCache
 from kiki.ui.menu_model import build_pet_menu
 

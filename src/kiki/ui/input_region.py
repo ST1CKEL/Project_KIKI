@@ -6,10 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import cairo
-import gi
 
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import GdkPixbuf  # noqa: E402
+from kiki.ui.gi_bootstrap import GdkPixbuf
 
 PixbufLoader = Callable[[Path], GdkPixbuf.Pixbuf]
 

@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-from gi.repository import Gtk, Pango
-
 from kiki.tools.registry import ActionPreview
+from kiki.ui.gi_bootstrap import Gtk, Pango
 
 
 class ApprovalCard(Gtk.Box):

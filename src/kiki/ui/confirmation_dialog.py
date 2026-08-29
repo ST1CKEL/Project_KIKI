@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-from gi.repository import Adw, Gtk
-
 from kiki.tools.registry import ActionPreview
+from kiki.ui.gi_bootstrap import Adw, Gtk
 
 
 def present_confirmation(

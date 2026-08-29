@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from gi.repository import Gtk
+from kiki.ui.gi_bootstrap import Gtk
 
 
 class SessionStatus(Gtk.Box):

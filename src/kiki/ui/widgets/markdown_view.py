@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from gi.repository import Gtk, Pango
-
 from kiki.text.markdown import (
     CodeBlock,
     Heading,
@@ -10,6 +8,7 @@ from kiki.text.markdown import (
     parse_markdown,
     spans_to_pango,
 )
+from kiki.ui.gi_bootstrap import Gtk, Pango
 from kiki.ui.widgets.code_block import CodeBlockWidget
 
 

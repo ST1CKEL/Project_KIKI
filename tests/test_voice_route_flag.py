@@ -1096,8 +1096,9 @@ def test_a_controller_failure_before_playback_announces_no_audio(tmp_path: Path)
 
 def test_the_next_utterance_can_announce_again(tmp_path: Path) -> None:
     controller = _FakeController()
+    submit = _DeferredSubmit()
     director, _player, events = _director_with_audio(
-        tmp_path, controller=controller, flag=True, submit=_DeferredSubmit()
+        tmp_path, controller=controller, flag=True, submit=submit
     )
     director.say("Erster.")
     director.audio_started(_event(director))
@@ -1105,6 +1106,7 @@ def test_the_next_utterance_can_announce_again(tmp_path: Path) -> None:
     director.audio_started(_event(director))
 
     assert events.count("audio") == 2
+    submit.discard()
 
 
 def test_the_file_route_announces_audio_together_with_speaking(tmp_path: Path) -> None:

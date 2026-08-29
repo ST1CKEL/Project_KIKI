@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from gi.repository import Adw, Gio, Gtk
-
 from kiki.agents.session_service import SessionService
 from kiki.runtime.async_bridge import AsyncBridge
+from kiki.ui.gi_bootstrap import Adw, Gio, Gtk
 from kiki.workspaces.models import Workspace, WorkspaceError
 
 log = logging.getLogger(__name__)

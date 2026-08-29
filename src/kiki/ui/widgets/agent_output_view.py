@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from gi.repository import Gtk
-
 from kiki.agents.models import AgentEvent
+from kiki.ui.gi_bootstrap import Gtk
 
 
 class AgentOutputView(Gtk.ScrolledWindow):

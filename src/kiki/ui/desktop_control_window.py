@@ -11,8 +11,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from gi.repository import Adw, Gio, Gtk
-
 from kiki.agents.models import AgentError
 from kiki.agents.session_service import SessionService
 from kiki.config.settings import Settings
@@ -27,6 +25,7 @@ from kiki.ui.desktop_control_model import (
     prepare_workspace_file,
     prepare_workspace_folder,
 )
+from kiki.ui.gi_bootstrap import Adw, Gio, Gtk
 from kiki.workspaces.models import Workspace, WorkspaceError
 
 log = logging.getLogger(__name__)

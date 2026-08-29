@@ -383,12 +383,24 @@ class SpeechDirector:
                 _unlink(dest)
                 raise
 
-        handle = self._submit(
-            _run(),
-            on_success=lambda path: self._on_wav(generation, path),
-            on_error=lambda exc: self._on_synth_failed(generation, dest, exc),
-        )
+        coro = _run()
+        try:
+            handle = self._submit(
+                coro,
+                on_success=lambda path: self._on_wav(generation, path),
+                on_error=lambda exc: self._on_synth_failed(generation, dest, exc),
+            )
+        except Exception:
+            coro.close()
+            self._reject_synth(generation, dest)
+            log.debug("synth task submission failed", exc_info=True)
+            return
         if handle is None:
+            # None means the submitter did not take ownership.  Closing here
+            # prevents an un-awaited coroutine and rolling the job back keeps
+            # `active` honest for headless/test submitters and a stopped bridge.
+            coro.close()
+            self._reject_synth(generation, dest)
             return
         with self._lock:
             stale = generation != self._generation
@@ -398,6 +410,23 @@ class SpeechDirector:
             # stop() may win the race before submit() returns its handle.
             handle.cancel()
             _unlink(dest)
+
+    def _reject_synth(self, generation: int, dest: Path) -> None:
+        """Roll back a WAV job that no async submitter accepted."""
+        with self._lock:
+            if generation != self._generation:
+                idle = False
+            else:
+                self._synth_handle = None
+                self._active_synth_path = None
+                self._synth_busy = False
+                # A submitter that rejects one job cannot run the queued ones
+                # either.  Drop this utterance rather than recurse over it.
+                self._synth_queue.clear()
+                idle = self._maybe_idle_locked()
+        _unlink(dest)
+        if idle:
+            self._emit_idle()
 
     def _arm_locked(self) -> Jobs:
         """Pick the next piece of work for whichever route is active.
@@ -456,9 +485,12 @@ class SpeechDirector:
             )
         except Exception as exc:
             coro.close()
-            self._on_route_failed(generation, exc)
+            self._reject_route(generation)
+            log.debug("voice route submission failed: %s", type(exc).__name__)
             return
         if handle is None:
+            coro.close()
+            self._reject_route(generation)
             return
         with self._lock:
             stale = generation != self._generation
@@ -467,6 +499,20 @@ class SpeechDirector:
         if stale:
             # stop() may win the race before submit() returns its handle.
             handle.cancel()
+
+    def _reject_route(self, generation: int) -> None:
+        """Roll back a controller request that no async submitter accepted."""
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._route_handle = None
+            self._route_busy = False
+            self._route_request_id = None
+            self._route_announced = False
+            self._synth_queue.clear()
+            idle = self._maybe_idle_locked()
+        if idle:
+            self._emit_idle()
 
     def _on_route_done(self, generation: int, result: TTSGenerationResult | None) -> None:
         error = getattr(result, "error", "") or ""
@@ -535,13 +581,16 @@ class SpeechDirector:
             return
         coro = self._controller.interrupt()
         try:
-            self._submit(
+            handle = self._submit(
                 coro,
                 on_error=lambda exc: log.debug("voice interrupt failed: %s", exc),
             )
         except Exception:
             coro.close()
             log.debug("could not hand the interrupt to the bridge", exc_info=True)
+            return
+        if handle is None:
+            coro.close()
 
     def _take_play_locked(self) -> PlayJob | None:
         if self._playing or not self._play_queue:

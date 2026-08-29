@@ -7,7 +7,11 @@ import time
 import uuid
 from pathlib import Path
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+# This import is intentionally isolated: it selects and loads GI versions
+# before any other KIKI module can import a GTK widget.
+# isort: off
+from kiki.ui.gi_bootstrap import Adw, Gdk, Gio, GLib, Gtk
+# isort: on
 
 from kiki import APP_ID, APP_NAME
 from kiki.agents.broker import AgentBroker
@@ -69,7 +73,6 @@ from kiki.ui.confirmation_dialog import present_confirmation
 from kiki.ui.css import APP_CSS
 from kiki.ui.desktop_control_model import is_desktop_control_intent
 from kiki.ui.desktop_control_window import DesktopControlWindow
-from kiki.ui.gi_bootstrap import gi  # noqa: F401  — side-effect import
 from kiki.ui.pet_window import PetWindow
 from kiki.ui.preferences_window import PreferencesWindow
 from kiki.ui.run_bar_model import text_for as run_status_text
@@ -1378,12 +1381,17 @@ class KikiApplication(Adw.Application):
         if controller is None:
             return
         self._voice_controller = None
+        coro = controller.shutdown()
         try:
             self._bridge.submit(
-                controller.shutdown(),
+                coro,
                 on_error=lambda exc: log.debug("voice controller shutdown failed: %s", exc),
             )
         except Exception:
+            # Creating a coroutine transfers ownership only once submit()
+            # accepts it.  A stopped bridge rejects it synchronously, so the
+            # caller must close it instead of leaving a RuntimeWarning behind.
+            coro.close()
             log.debug("could not hand the voice shutdown to the bridge", exc_info=True)
 
     def _on_tts_error(self, exc: BaseException) -> None:

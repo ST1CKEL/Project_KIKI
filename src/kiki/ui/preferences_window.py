@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from gi.repository import Adw, Gtk
-
 from kiki.ai.factory import create_provider
 from kiki.ai.provider import ProviderHealth
 from kiki.config.settings import VALID_TTS_SPEAKERS, Settings, save_settings
 from kiki.platform import autostart as autostart_mod
 from kiki.runtime.async_bridge import AsyncBridge
 from kiki.storage.secrets import OPENAI_API_KEY, SecretStore, SecretStoreError
+from kiki.ui.gi_bootstrap import Adw, Gtk
 from kiki.voice.system_tts import system_tts_available
 from kiki.voice.tts_client import TtsHealth, tts_health
 
