@@ -137,10 +137,13 @@ command_timeout_s = 12
 follow_up = true
 
 [voice.response_policy]
-# What KIKI reads out loud. She always speaks the whole answer — there is no
-# length limit — so this is only about which categories are removed first.
-# Speech can be overheard and recorded, so each one stays off until you switch
-# it on. Everything removed here is still visible in the chat.
+# For a microphone-started turn KIKI speaks at most two sentences / 300
+# characters. The complete answer remains unchanged in chat.
+concise_answers = true
+# Bring the chat forward when speech was shortened or privacy-redacted.
+open_chat_for_details = true
+# Speech can be overheard and recorded, so each category stays off until you
+# switch it on. Everything removed here is still visible in the chat.
 # Set voice.enabled = false to stop KIKI speaking at all.
 speak_code = false
 speak_logs = false

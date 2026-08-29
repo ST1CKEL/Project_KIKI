@@ -48,16 +48,22 @@ class _Wake:
 class _Chat:
     def __init__(self) -> None:
         self.listening: list[bool] = []
+        self.notes: list[str] = []
 
     def set_listening(self, value: bool) -> None:
         self.listening.append(value)
+
+    def append_note(self, text: str, *, toast=None) -> None:
+        self.notes.append(text)
 
 
 class _AppStub:
     from kiki.application import KikiApplication
 
     _follow_up_allowed = KikiApplication._follow_up_allowed
+    _plan_voice_answer = KikiApplication._plan_voice_answer
     _try_arm_follow_up = KikiApplication._try_arm_follow_up
+    _voice_policy = KikiApplication._voice_policy
 
     def __init__(self, *, follow_up: bool = True) -> None:
         self._settings = Settings()
@@ -69,6 +75,7 @@ class _AppStub:
         self._chat = _Chat()
         self._machine = CharacterStateMachine()
         self.resumes = 0
+        self.opened = 0
         self.toasts: list[str] = []
 
     def _resume_wake(self) -> None:
@@ -76,6 +83,9 @@ class _AppStub:
 
     def _toast(self, text: str) -> None:
         self.toasts.append(text)
+
+    def open_chat(self) -> None:
+        self.opened += 1
 
 
 def _ready(stub: _AppStub) -> None:
@@ -161,3 +171,50 @@ def test_chat_completion_without_tts_does_not_open_a_silent_follow_up() -> None:
 
     assert stub._wake.captures == 0
     assert stub._machine.state is CharacterState.IDLE
+
+
+def test_streamed_voice_answer_is_planned_once_and_full_text_stays_in_chat() -> None:
+    from kiki.application import KikiApplication
+    from kiki.voice.answer import CHAT_NOTICE
+
+    class Speech:
+        def __init__(self) -> None:
+            self.active = False
+            self.fed: list[str] = []
+            self.spoken: list[str] = []
+
+        def feed(self, text: str) -> None:
+            self.fed.append(text)
+
+        def say(self, text: str) -> None:
+            self.spoken.append(text)
+            self.active = True
+
+    stub = _AppStub()
+    stub._speech = Speech()
+    stub._follow_up.begin(enabled=True)
+    full = "Erstens. Zweitens. Drittens. Viertens."
+
+    KikiApplication._on_stream_delta(stub, text=full)
+    KikiApplication._on_stream_done(stub, ok=True, text=full)
+
+    assert stub._speech.fed == []
+    assert stub._speech.spoken == [f"Erstens. Zweitens. {CHAT_NOTICE}"]
+    assert stub.opened == 1
+    # The application never mutates the event payload containing the full text.
+    assert full == "Erstens. Zweitens. Drittens. Viertens."
+
+
+def test_harness_keeps_full_long_answer_in_chat() -> None:
+    from kiki.application import KikiApplication
+
+    stub = _AppStub()
+    stub._harness = object()
+    stub._follow_up.begin(enabled=True)
+    stub._follow_up.mark_terminal()
+    full = "Erstens. Zweitens. Drittens. Viertens."
+
+    KikiApplication._apply_harness_answer(stub, full)
+
+    assert stub.opened == 1
+    assert stub._chat.notes == [full]

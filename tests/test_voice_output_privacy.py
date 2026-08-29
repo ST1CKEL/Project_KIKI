@@ -181,14 +181,14 @@ def test_a_submitter_that_declines_the_job_leaves_no_phantom_activity(tmp_path) 
     assert director.active is False
 
 
-# -- no speech length cap (decided) -------------------------------------------
+# -- length is planned only for a complete microphone answer ------------------
 
 
 def test_the_length_cap_is_not_applied_to_a_chunk() -> None:
     """`redact_chunk` redacts; it must not silently shorten an answer.
 
-    Decided: KIKI speaks the whole answer. Redaction is about *what* may be
-    said, never about how much.
+    A streaming chunk has no knowledge of the whole answer. Applying a global
+    cap here would truncate every chunk independently.
     """
     long_answer = " ".join(f"Das ist Satz Nummer {n}." for n in range(1, 21))
     spoken = VoiceResponsePolicy().redact_chunk(long_answer)
@@ -196,14 +196,8 @@ def test_the_length_cap_is_not_applied_to_a_chunk() -> None:
     assert len(spoken) > 300
 
 
-def test_no_route_caps_what_kiki_says() -> None:
-    """The capping machinery still exists; nothing on a speech path calls it.
-
-    `plan()` can still truncate -- it is kept because the policy owns the
-    vocabulary -- but neither route uses it, so both speak the full answer.
-    If a cap is ever wanted it belongs on a whole answer, and this test should
-    be rewritten rather than deleted.
-    """
+def test_low_level_routes_never_apply_a_whole_answer_cap_per_chunk() -> None:
+    """The application plans once; low-level streaming routes only redact."""
     policy = VoiceResponsePolicy()
     long_answer = " ".join(f"Das ist Satz Nummer {n}." for n in range(1, 21))
     assert policy.plan(long_answer, mode=VoiceMode.CONCISE).truncated is True
@@ -292,8 +286,10 @@ def test_the_settings_round_trip() -> None:
 def test_the_application_hands_over_a_live_source() -> None:
     """Uncalled on purpose: a called method would freeze the rule at startup."""
     source = Path("src/kiki/application.py").read_text(encoding="utf-8")
-    assert "policy=self._voice_policy," in source
-    assert "policy=self._voice_policy()" not in source
+    start = source.index("self._speech = SpeechDirector(")
+    constructor = source[start : source.index("\n        )", start)]
+    assert "policy=self._voice_policy," in constructor
+    assert "policy=self._voice_policy()" not in constructor
     assert "self._settings.voice.response_policy" in source
 
 

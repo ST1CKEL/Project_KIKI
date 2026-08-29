@@ -220,6 +220,25 @@ class PreferencesWindow(Adw.PreferencesDialog):
         stream.set_subtitle("Aus: erst nach der vollständigen Antwort.")
         stream.set_active(self._settings.tts.stream_sentences)
         stream.connect("notify::active", lambda r, *_: self._set_tts_stream(r.get_active()))
+        concise = Adw.SwitchRow(title="Sprachantworten kurz halten")
+        concise.set_subtitle(
+            "Bei Fragen per Mikrofon höchstens zwei Sätze vorlesen; die vollständige Antwort bleibt erhalten."
+        )
+        concise.set_active(self._settings.voice.response_policy.concise_answers)
+        concise.connect(
+            "notify::active", lambda r, *_: self._set_voice_concise(r.get_active())
+        )
+        open_details = Adw.SwitchRow(title="Details automatisch im Chat öffnen")
+        open_details.set_subtitle(
+            "Öffnet den vollständigen Text, wenn KIKI beim Vorlesen etwas kürzt oder aus Datenschutzgründen auslässt."
+        )
+        open_details.set_active(
+            self._settings.voice.response_policy.open_chat_for_details
+        )
+        open_details.connect(
+            "notify::active",
+            lambda r, *_: self._set_voice_open_details(r.get_active()),
+        )
         fallback = Adw.SwitchRow(title="Lokale Ersatzstimme")
         fallback.set_subtitle("Verwendet espeak-ng, wenn der GPU-TTS-Dienst nicht läuft.")
         fallback.set_active(self._settings.tts.fallback_to_system)
@@ -246,6 +265,8 @@ class PreferencesWindow(Adw.PreferencesDialog):
         self._tts_status.add_css_class("dim-label")
         tts.add(trow)
         tts.add(stream)
+        tts.add(concise)
+        tts.add(open_details)
         tts.add(fallback)
         tts.add(self._tts_speaker)
         tts.add(self._tts_url)
@@ -747,6 +768,14 @@ class PreferencesWindow(Adw.PreferencesDialog):
 
     def _set_tts_stream(self, value: bool) -> None:
         self._settings.tts.stream_sentences = value
+        self._persist()
+
+    def _set_voice_concise(self, value: bool) -> None:
+        self._settings.voice.response_policy.concise_answers = value
+        self._persist()
+
+    def _set_voice_open_details(self, value: bool) -> None:
+        self._settings.voice.response_policy.open_chat_for_details = value
         self._persist()
 
     def _set_tts_fallback(self, value: bool) -> None:

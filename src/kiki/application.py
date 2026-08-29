@@ -77,6 +77,7 @@ from kiki.ui.pet_window import PetWindow
 from kiki.ui.preferences_window import PreferencesWindow
 from kiki.ui.run_bar_model import text_for as run_status_text
 from kiki.ui.workspace_manager_window import WorkspaceManagerWindow
+from kiki.voice.answer import VoiceAnswerDelivery, plan_voice_answer
 from kiki.voice.director import SpeechDirector
 from kiki.voice.follow_up import FollowUpTurn
 from kiki.voice.recorder import AudioRecorder, RecorderError
@@ -450,6 +451,10 @@ class KikiApplication(Adw.Application):
             # Shutdown happened while this sat in the idle queue.
             return False
         try:
+            if self._follow_up.active and self._follow_up.terminal:
+                delivery = self._plan_voice_answer(text)
+                if delivery.open_chat:
+                    self.open_chat()
             if self._chat is not None:
                 self._chat.append_note(text, toast=None)
             else:
@@ -480,13 +485,19 @@ class KikiApplication(Adw.Application):
         if self._harness is None:
             self._follow_up.cancel()
             return False
+        spoken = text
+        if self._follow_up.active and self._follow_up.terminal:
+            delivery = self._plan_voice_answer(text)
+            spoken = delivery.spoken_text
+            if delivery.open_chat:
+                self.open_chat()
         speech = self._speech
         if self._settings.tts_allowed() and speech is not None:
             try:
                 # `say()` first stops an older intermediate prompt. Marking
                 # delivery afterwards prevents that prompt's idle callback
                 # from opening follow-up before the final answer starts.
-                speech.say(text)
+                speech.say(spoken)
             except Exception:
                 self._follow_up.cancel()
                 log.warning("harness speech could not be delivered")
@@ -561,6 +572,15 @@ class KikiApplication(Adw.Application):
                 speak_tables=chosen.speak_tables,
                 speak_secrets=chosen.speak_secrets,
             )
+        )
+
+    def _plan_voice_answer(self, text: str) -> VoiceAnswerDelivery:
+        chosen = self._settings.voice.response_policy
+        return plan_voice_answer(
+            text,
+            policy=self._voice_policy(),
+            concise=chosen.concise_answers,
+            open_chat_for_details=chosen.open_chat_for_details,
         )
 
     def _build_voice_controller(self):
@@ -1280,7 +1300,9 @@ class KikiApplication(Adw.Application):
         self._voice_busy = False
         if self._machine.state is CharacterState.THINKING:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
-        self._route_spoken_text(text, correlation_id=correlation_id)
+        self._follow_up.begin(enabled=False)
+        if not self._route_spoken_text(text, correlation_id=correlation_id):
+            self._follow_up.cancel()
 
     def _route_spoken_text(self, text: str, *, correlation_id: str = "") -> bool:
         """One path for recognized speech, whether push-to-talk or wake word.
@@ -1360,11 +1382,19 @@ class KikiApplication(Adw.Application):
 
     def _on_stream_start(self, **_payload: object) -> None:
         self.stop_speech()
-        if self._settings.tts_allowed() and self._speech is not None:
+        if (
+            not self._follow_up.active
+            and self._settings.tts_allowed()
+            and self._speech is not None
+        ):
             self._speech.begin()
         self._machine.set(CharacterState.THINKING, hold_ms=0)
 
     def _on_stream_delta(self, **payload: object) -> None:
+        if self._follow_up.active:
+            # A microphone-started answer is planned once as a whole at done;
+            # speaking deltas here would bypass its global sentence budget.
+            return
         if not self._settings.tts_allowed() or self._speech is None:
             return
         if not self._settings.tts.stream_sentences:
@@ -1388,16 +1418,25 @@ class KikiApplication(Adw.Application):
         if not ok:
             self._follow_up.cancel()
             return
+        voice_turn = self._follow_up.active
         self._follow_up.mark_terminal()
-        delivered = self._follow_up.mark_response_delivered()
         text = payload.get("text")
         if self._settings.tts_allowed() and self._speech is not None:
+            if voice_turn:
+                answer = text if isinstance(text, str) else ""
+                delivery = self._plan_voice_answer(answer)
+                if delivery.open_chat:
+                    self.open_chat()
+                self._speech.say(delivery.spoken_text)
+                delivered = self._follow_up.mark_response_delivered()
+                if delivered and not self._speech.active:
+                    self._try_arm_follow_up()
+                return
             if not self._settings.tts.stream_sentences and isinstance(text, str) and text.strip():
                 self._speech.feed(text)
             self._speech.flush()
-            if delivered and not self._speech.active:
-                self._try_arm_follow_up()
             return
+        delivered = self._follow_up.mark_response_delivered()
         if delivered and self._try_arm_follow_up():
             return
         if self._machine.state is not CharacterState.PAUSED:

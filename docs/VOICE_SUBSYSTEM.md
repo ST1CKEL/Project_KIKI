@@ -98,6 +98,20 @@ getippte Chats können deshalb kein Follow-up-Mikrofon öffnen. Der Vosk-Erkenne
 bleibt lokal, schreibt kein Audio und verwirft Text außerhalb eines expliziten
 Befehls- oder Follow-up-Fensters.
 
+### Kompakte Antwort bei Spracheingabe
+
+Ein mikrofoninitiierter Turn wartet mit TTS bis zur vollständigen Modellantwort.
+`plan_voice_answer()` redigiert sie anschließend als Ganzes und begrenzt den
+gesprochenen Begleittext standardmäßig auf zwei Sätze beziehungsweise 300
+Zeichen. Dadurch wird das Limit genau einmal angewandt und nicht erneut auf
+jeden Streaming-Chunk. Der Chat- und Storage-Pfad behält stets den
+unveränderten Volltext.
+
+Wurde Text gekürzt oder wegen Code, Logs, URLs, Pfaden, Tabellen oder möglichen
+Secrets nicht gesprochen, bringt KIKI den Chat mit der vollständigen Antwort
+nach vorn und weist in der Sprachausgabe darauf hin. Normale getippte Chats,
+Hinweise und Begrüßungen behalten ihren bisherigen Streaming-Pfad.
+
 ---
 
 ## 🔊 Qwen3-TTS GPU-Dienst

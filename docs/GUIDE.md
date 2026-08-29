@@ -206,6 +206,7 @@ KIKI kann Bilder und Bildschirmfotos analysieren, um dir bei visuellen Aufgaben,
 
 ### Sprachausgabe (TTS)
 - **Qwen3-TTS GPU-Dienst:** Erzeugt flüssige, warm klingende deutsche Sprache mit Satz-Streaming.
+- **Kompakte Sprachantwort:** Auf Mikrofonfragen liest KIKI höchstens zwei Sätze bzw. 300 Zeichen vor. Gekürzte sowie aus Datenschutzgründen ausgelassene Details erscheinen vollständig im automatisch geöffneten Chat.
 - **Barge-in / Sofortiger Abbruch:** Klickst du während des Sprechens auf Stop oder sendest eine neue Nachricht, stoppt KIKI die Audioausgabe augenblicklich und verwirft noch in Berechnung befindliche Audioschnipsel.
 - **Systemstimmen-Fallback:** Ist kein GPU-Server aktiv, liest KIKI Texte automatisch über Fedoras Systemstimme (`espeak-ng`) vor.
 

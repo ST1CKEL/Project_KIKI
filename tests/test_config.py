@@ -41,6 +41,8 @@ def test_defaults_load() -> None:
     assert settings.agents.opencode_binary == "opencode"
     assert settings.agents.plan_first is True
     assert settings.voice.wake.follow_up is True
+    assert settings.voice.response_policy.concise_answers is True
+    assert settings.voice.response_policy.open_chat_for_details is True
 
 
 def test_default_persona_is_direct_honest_and_agent_aware() -> None:
@@ -146,6 +148,25 @@ def test_damaged_follow_up_setting_fails_closed() -> None:
     data["voice"]["wake"]["follow_up"] = "yes"
 
     assert settings_from_mapping(data).voice.wake.follow_up is False
+
+
+def test_voice_answer_policy_roundtrip_and_safe_damaged_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    settings = load_settings(path)
+    settings.voice.response_policy.concise_answers = False
+    settings.voice.response_policy.open_chat_for_details = False
+    save_settings(settings, path)
+
+    loaded = load_settings(path)
+    assert loaded.voice.response_policy.concise_answers is False
+    assert loaded.voice.response_policy.open_chat_for_details is False
+
+    damaged = default_mapping()
+    damaged["voice"]["response_policy"]["concise_answers"] = "nein"
+    damaged["voice"]["response_policy"]["open_chat_for_details"] = 0
+    parsed = settings_from_mapping(damaged)
+    assert parsed.voice.response_policy.concise_answers is True
+    assert parsed.voice.response_policy.open_chat_for_details is True
 
 
 @pytest.mark.parametrize(

@@ -293,6 +293,7 @@ vielen kleinen Aufrufen, nicht Attention.
 | `models.py` | `TTSRequest`, `AudioChunk`, `TTSHealth`, Status, Capabilities, Ergebnis |
 | `provider.py` | `TTSProvider`-Protocol: `load`/`unload`/`synthesize`/`cancel` |
 | `policy.py` | Voice Response Policy: Modus, Längenkappung, Redaktion |
+| `answer.py` | Plant eine vollständige Mikrofonantwort einmalig für kompaktes TTS und entscheidet, ob der Volltext-Chat geöffnet wird |
 | `chunker.py` | deutscher Streaming-Chunker |
 | `fake.py` | `FakeTTSProvider` und `NullTTSProvider` für Tests |
 

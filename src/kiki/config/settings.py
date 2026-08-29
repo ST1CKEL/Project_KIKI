@@ -236,6 +236,10 @@ class ResponsePolicySettings:
     speak_paths: bool = False
     speak_tables: bool = False
     speak_secrets: bool = False
+    # Whole-answer policy for turns that started at the microphone. The full
+    # answer stays in chat; only its spoken companion is shortened.
+    concise_answers: bool = True
+    open_chat_for_details: bool = True
 
 
 @dataclass
@@ -415,6 +419,8 @@ class Settings:
                     "speak_paths": self.voice.response_policy.speak_paths,
                     "speak_tables": self.voice.response_policy.speak_tables,
                     "speak_secrets": self.voice.response_policy.speak_secrets,
+                    "concise_answers": self.voice.response_policy.concise_answers,
+                    "open_chat_for_details": self.voice.response_policy.open_chat_for_details,
                 },
             },
             "tts": {
@@ -660,6 +666,11 @@ def _parse_response_policy(data: dict[str, Any]) -> ResponsePolicySettings:
     def allowed(name: str) -> bool:
         return data.get(name) is True
 
+    def enabled_unless_explicitly_disabled(name: str) -> bool:
+        # Broken hand-written config must stay concise and keep omitted detail
+        # visible. Only a real TOML false relaxes either behaviour.
+        return data.get(name, True) is not False
+
     return ResponsePolicySettings(
         speak_code=allowed("speak_code"),
         speak_logs=allowed("speak_logs"),
@@ -667,6 +678,10 @@ def _parse_response_policy(data: dict[str, Any]) -> ResponsePolicySettings:
         speak_paths=allowed("speak_paths"),
         speak_tables=allowed("speak_tables"),
         speak_secrets=allowed("speak_secrets"),
+        concise_answers=enabled_unless_explicitly_disabled("concise_answers"),
+        open_chat_for_details=enabled_unless_explicitly_disabled(
+            "open_chat_for_details"
+        ),
     )
 
 
