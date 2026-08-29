@@ -15,9 +15,19 @@ def main(argv: list[str] | None = None) -> int:
         help="XDG-Pfade und Konfiguration prüfen, ohne GTK zu starten",
     )
     parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Fedora, Hardware und lokale Dienste passiv diagnostizieren",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="mit --doctor einen maschinenlesbaren JSON-Bericht ausgeben",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
-        help="mit --check bei fehlenden aktivierten Kernkomponenten fehlschlagen",
+        help="mit --check/--doctor bei fehlenden Kernkomponenten fehlschlagen",
     )
     parser.add_argument(
         "--prepare-voice-model",
@@ -25,6 +35,8 @@ def main(argv: list[str] | None = None) -> int:
         help="deutsches Offline-Sprachmodell sicher herunterladen und prüfen",
     )
     args, rest = parser.parse_known_args(argv)
+    if args.json and not args.doctor:
+        parser.error("--json kann nur zusammen mit --doctor verwendet werden")
     if args.version:
         from kiki import __version__
 
@@ -42,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.check:
         return _check(strict=args.strict)
+    if args.doctor:
+        return _doctor(strict=args.strict, as_json=args.json)
     os.environ.setdefault("ADW_DISABLE_PORTAL", "0")
     from kiki.logging_config import setup_logging
 
@@ -55,6 +69,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 from kiki.ai.factory import active_model  # noqa: E402
+
+
+def _doctor(*, strict: bool = False, as_json: bool = False) -> int:
+    from kiki.config.settings import load_settings
+    from kiki.platform.doctor import build_doctor_report
+
+    report = build_doctor_report(load_settings())
+    print(report.to_json() if as_json else report.to_text())
+    return 0 if not strict or report.strict_ok else 1
 
 
 def _check(*, strict: bool = False) -> int:

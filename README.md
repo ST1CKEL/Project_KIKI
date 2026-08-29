@@ -196,7 +196,20 @@ sudo dnf install ./dist/kiki-0.8.0-1.fc44.x86_64.rpm
 
 # KIKI aus dem Terminal oder dem GNOME-App-Menü starten
 kiki
+
+# Fedora, Hardware und lokale Dienste ohne Seiteneffekte prüfen
+kiki --doctor
+
+# Für Setup-/CI-Skripte: Fehlercode bei fehlenden Kernvoraussetzungen
+kiki --doctor --strict
+
+# Maschinenlesbare Ausgabe
+kiki --doctor --json
 ```
+
+Der Doctor liest nur lokale Systeminformationen und prüft konfigurierte Dienste
+ausschließlich auf Loopback-Adressen (`localhost`, `127.0.0.1`, `::1`). Externe
+KI- oder TTS-Provider werden dabei weder kontaktiert noch authentifiziert.
 
 ---
 
