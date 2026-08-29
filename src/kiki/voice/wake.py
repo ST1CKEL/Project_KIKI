@@ -17,6 +17,8 @@ tradeoff, and these rules are what make it defensible:
 * Text escapes exactly once the wake word was heard: the **next** utterance is
   handed over as the spoken command. Creating that boundary is the entire point
   of a wake word.
+* After an answered wake-word turn, the application may explicitly arm one
+  follow-up utterance. Silence returns the listener to wake-word matching.
 * The feature is opt-in and off by default, the panic switch kills it, and the
   figure shows visibly when the microphone is open.
 
@@ -319,6 +321,7 @@ class WakeWordListener:
         command_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
         on_detect: Callable[[], None],
         on_command: Callable[[str], None],
+        on_timeout: Callable[[], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
     ) -> None:
         cleaned = tuple(normalize(p) for p in phrases if normalize(p))
@@ -331,10 +334,14 @@ class WakeWordListener:
         self._command_timeout = max(1.0, command_timeout_s)
         self._on_detect = on_detect
         self._on_command = on_command
+        self._on_timeout = on_timeout
         self._on_error = on_error
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._paused = threading.Event()
+        # Vosk's recognizer is not thread-safe. The GTK thread resets it when
+        # speech ends, while the listener thread normally feeds it PCM.
+        self._stream_lock = threading.Lock()
         self._lock = threading.Lock()
         self._state = ListenerState.WAITING
         self._cooldown_until = 0.0
@@ -376,10 +383,25 @@ class WakeWordListener:
 
     def resume(self) -> None:
         if self._paused.is_set():
-            self._paused.clear()
             # Audio heard while paused must not leak into the next utterance.
-            self._stream.reset()
+            with self._stream_lock:
+                self._stream.reset()
+                self._paused.clear()
             self._state = ListenerState.WAITING
+
+    def capture_next(self) -> bool:
+        """Arm one utterance without requiring another wake word.
+
+        The caller owns the visible listening indicator. Returning ``False``
+        means KIKI is still paused and no microphone window was opened.
+        """
+        if self._paused.is_set() or self._stop.is_set():
+            return False
+        with self._stream_lock:
+            self._stream.reset()
+            self._state = ListenerState.CAPTURING
+            self._capture_deadline = time.monotonic() + self._command_timeout
+        return True
 
     def stop(self) -> None:
         with self._lock:
@@ -397,6 +419,8 @@ class WakeWordListener:
         moment = time.monotonic() if now is None else now
         if self._state is ListenerState.CAPTURING and moment > self._capture_deadline:
             self._state = ListenerState.WAITING
+            if self._on_timeout is not None:
+                self._on_timeout()
         if text is None:
             return
         if self._state is ListenerState.CAPTURING:
@@ -427,7 +451,9 @@ class WakeWordListener:
                     # Still tick the state machine so a capture can time out.
                     self.handle(None)
                     continue
-                self.handle(self._stream.feed(chunk))
+                with self._stream_lock:
+                    heard = self._stream.feed(chunk)
+                self.handle(heard)
         except Exception as exc:  # pragma: no cover - hardware failure path
             log.exception("wake listener crashed")
             if self._on_error is not None:

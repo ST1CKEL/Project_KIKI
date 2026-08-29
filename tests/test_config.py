@@ -40,6 +40,7 @@ def test_defaults_load() -> None:
     assert "~/Dokumente/Projekte" in settings.workspaces.allowed_roots
     assert settings.agents.opencode_binary == "opencode"
     assert settings.agents.plan_first is True
+    assert settings.voice.wake.follow_up is True
 
 
 def test_default_persona_is_direct_honest_and_agent_aware() -> None:
@@ -131,11 +132,20 @@ def test_wake_settings_roundtrip(tmp_path: Path) -> None:
     settings.voice.wake.enabled = True
     settings.voice.wake.phrases = ("kiki", "computer")
     settings.voice.wake.cooldown_ms = 500
+    settings.voice.wake.follow_up = False
     save_settings(settings, path)
     loaded = load_settings(path)
     assert loaded.voice.wake.enabled is True
     assert loaded.voice.wake.phrases == ("kiki", "computer")
     assert loaded.voice.wake.cooldown_ms == 500
+    assert loaded.voice.wake.follow_up is False
+
+
+def test_damaged_follow_up_setting_fails_closed() -> None:
+    data = default_mapping()
+    data["voice"]["wake"]["follow_up"] = "yes"
+
+    assert settings_from_mapping(data).voice.wake.follow_up is False
 
 
 @pytest.mark.parametrize(

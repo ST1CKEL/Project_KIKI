@@ -161,6 +161,13 @@ Damit braucht der Befehl nach dem Weckwort weder eine zweite Pipeline noch eine
 geratene Aufnahmedauer: Vosk beendet eine Äußerung rund 1,0–1,15 s nach dem
 Verstummen.
 
+Nach einer final ausgegebenen Antwort darf `FollowUpTurn` denselben
+`capturing`-Zustand genau einmal ohne neues Weckwort aktivieren. Dafür müssen
+Start per Weckwort, terminaler Run und tatsächlich ausgelieferte Antwort
+zusammenkommen. Bestätigungsansagen und andere TTS-Ausgaben erfüllen diese
+Bedingung nicht. Ein Timeout beendet die sichtbare Hörphase und führt zurück zu
+`waiting`; das Verhalten lässt sich unabhängig vom Weckwortschalter abschalten.
+
 **Warum kein Grammatikmodus.** Der naheliegende Ansatz — `vosk_recognizer_new_grm`
 mit `["kiki", "hey kiki", …, "[unk]"]` — wurde gemessen und verworfen. Das kleine
 deutsche Modell bildet beliebige Sprache auf die kurzen Weckphrasen ab: „der

@@ -78,6 +78,7 @@ from kiki.ui.preferences_window import PreferencesWindow
 from kiki.ui.run_bar_model import text_for as run_status_text
 from kiki.ui.workspace_manager_window import WorkspaceManagerWindow
 from kiki.voice.director import SpeechDirector
+from kiki.voice.follow_up import FollowUpTurn
 from kiki.voice.recorder import AudioRecorder, RecorderError
 from kiki.voice.stt import SpeechError, ensure_vosk_model, transcribe_wav, vosk_model_ready
 from kiki.voice.system_tts import synthesize_system_wav
@@ -126,6 +127,7 @@ class KikiApplication(Adw.Application):
         self._voice_busy = False
         self._wake: WakeWordListener | None = None
         self._wake_starting = False
+        self._follow_up = FollowUpTurn()
         self._watch: WatchService | None = None
         self._notifier: Notifier | None = None
         self._routines: RoutineRepository | None = None
@@ -342,6 +344,7 @@ class KikiApplication(Adw.Application):
     def _on_harness_bridge_error(self, _exc: BaseException) -> None:
         from kiki.assistant import RunPausedError
 
+        self._follow_up.cancel()
         if isinstance(_exc, RunPausedError):
             GLib.idle_add(self._toast, "KIKI macht gerade Pause.")
             return
@@ -402,7 +405,12 @@ class KikiApplication(Adw.Application):
 
     def _apply_harness_status(self, event: HarnessStatusEvent) -> bool:
         if self._harness is None:
+            self._follow_up.cancel()
             return False
+        if event.terminal:
+            self._follow_up.mark_terminal(
+                cancelled=event.message_code == "cancelled"
+            )
         try:
             if self._chat is not None and hasattr(self._chat, "set_run_status"):
                 self._chat.set_run_status(
@@ -469,15 +477,27 @@ class KikiApplication(Adw.Application):
         timer notifications use: it routes to the active player, obeys the mute
         switch and stays out of the token loop.
         """
-        if self._harness is None or self._speech is None:
+        if self._harness is None:
+            self._follow_up.cancel()
             return False
-        if not self._settings.tts_allowed():
+        speech = self._speech
+        if self._settings.tts_allowed() and speech is not None:
+            try:
+                # `say()` first stops an older intermediate prompt. Marking
+                # delivery afterwards prevents that prompt's idle callback
+                # from opening follow-up before the final answer starts.
+                speech.say(text)
+            except Exception:
+                self._follow_up.cancel()
+                log.warning("harness speech could not be delivered")
+                self._harness_delivery_failed()
+                return False
+            delivered = self._follow_up.mark_response_delivered()
+            if delivered and not speech.active:
+                self._try_arm_follow_up()
             return False
-        try:
-            self._speech.say(text)
-        except Exception:
-            log.warning("harness speech could not be delivered")
-            self._harness_delivery_failed()
+        if self._follow_up.mark_response_delivered():
+            self._try_arm_follow_up()
         return False
 
     def _on_harness_confirmation(self, request: ConfirmationRequest) -> None:
@@ -973,6 +993,7 @@ class KikiApplication(Adw.Application):
             return
         if self._voice_busy:
             return
+        self._follow_up.cancel()
         self.stop_speech()
         if not vosk_model_ready():
             self._voice_busy = True
@@ -1118,6 +1139,7 @@ class KikiApplication(Adw.Application):
                 command_timeout_s=wake.command_timeout_s,
                 on_detect=lambda: GLib.idle_add(self._on_wake_detected),
                 on_command=lambda text: GLib.idle_add(self._on_wake_command, text),
+                on_timeout=lambda: GLib.idle_add(self._on_wake_timeout),
                 on_error=lambda exc: GLib.idle_add(self._on_wake_error, exc),
             )
             await asyncio.to_thread(listener.start)
@@ -1150,6 +1172,7 @@ class KikiApplication(Adw.Application):
         self._toast(message)
 
     def _stop_wake(self) -> None:
+        self._follow_up.cancel()
         listener, self._wake = self._wake, None
         if listener is None:
             return
@@ -1164,6 +1187,7 @@ class KikiApplication(Adw.Application):
             self._wake.resume()
 
     def _on_wake_detected(self) -> bool:
+        self._follow_up.cancel()
         self.stop_speech()
         self._machine.set(CharacterState.LISTENING, hold_ms=0)
         if self._chat is not None:
@@ -1176,9 +1200,52 @@ class KikiApplication(Adw.Application):
             self._chat.set_listening(False)
         if self._machine.state is CharacterState.LISTENING:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
+        self._follow_up.begin(enabled=self._follow_up_allowed())
         # One captured command is one spoken event, minted at the source.
-        self._route_spoken_text(text, correlation_id=f"wake-{uuid.uuid4().hex[:12]}")
+        started = self._route_spoken_text(
+            text, correlation_id=f"wake-{uuid.uuid4().hex[:12]}"
+        )
+        if not started:
+            self._follow_up.cancel()
         return False
+
+    def _on_wake_timeout(self) -> bool:
+        """Close the visible listening state after wake or follow-up silence."""
+        if self._chat is not None:
+            self._chat.set_listening(False)
+        if self._machine.state is CharacterState.LISTENING:
+            self._machine.set(CharacterState.IDLE, hold_ms=0)
+        self._toast("Zuhören beendet. Sag „KIKI“ für eine neue Frage.")
+        return False
+
+    def _follow_up_allowed(self) -> bool:
+        wake = self._settings.voice.wake
+        return bool(
+            self._settings.voice_allowed()
+            and self._settings.voice.auto_send
+            and self._settings.tts_allowed()
+            and wake.enabled
+            and wake.follow_up
+            and self._wake is not None
+            and not self._assistant_pause.paused
+        )
+
+    def _try_arm_follow_up(self) -> bool:
+        """Consume a finished voice turn and open one local listening window."""
+        if not self._follow_up.consume_ready():
+            return False
+        if not self._follow_up_allowed():
+            self._resume_wake()
+            return False
+        self._resume_wake()
+        listener = self._wake
+        if listener is None or not listener.capture_next():
+            return False
+        self._machine.set(CharacterState.LISTENING, hold_ms=0)
+        if self._chat is not None:
+            self._chat.set_listening(True)
+        self._toast("KIKI hört noch kurz zu. Du kannst direkt weiterreden.")
+        return True
 
     def _stop_voice(self, *, discard: bool) -> None:
         path = self._recorder.stop()
@@ -1215,7 +1282,7 @@ class KikiApplication(Adw.Application):
             self._machine.set(CharacterState.IDLE, hold_ms=0)
         self._route_spoken_text(text, correlation_id=correlation_id)
 
-    def _route_spoken_text(self, text: str, *, correlation_id: str = "") -> None:
+    def _route_spoken_text(self, text: str, *, correlation_id: str = "") -> bool:
         """One path for recognized speech, whether push-to-talk or wake word.
 
         One spoken event becomes exactly one run: the correlation id binds the
@@ -1225,22 +1292,22 @@ class KikiApplication(Adw.Application):
         """
         if not text.strip():
             self._toast("Nichts verstanden. Bitte nochmal.")
-            return
+            return False
         if is_desktop_control_intent(text):
             self.open_desktop_control()
             self._toast("PC-Steuerung geöffnet. Aktionen brauchen weiterhin einen Klick und Freigabe.")
-            return
+            return False
         if not self._settings.voice.auto_send:
             self.open_chat()
             if self._chat is not None:
                 self._chat.submit_transcript(text.strip(), send=False)
-            return
+            return False
         if self._assistant_pause.paused:
             # Spoken to, but paused: the toast alone would be invisible to
             # someone talking. Say it, once, and drop the utterance.
             self._toast("KIKI macht gerade Pause.")
             self._say_paused()
-            return
+            return False
         service = self._harness or self._build_harness()
         if service is None:
             # No run service (no tool-capable provider): the chat still
@@ -1248,14 +1315,19 @@ class KikiApplication(Adw.Application):
             self.open_chat()
             if self._chat is not None:
                 self._chat.submit_transcript(text.strip(), send=True)
-            return
+                return True
+            return False
         if service.busy:
             self._toast("KIKI arbeitet noch an der letzten Aufgabe.")
-            return
-        self._bridge.submit(
-            service.ask(text.strip(), correlation_id=correlation_id),
-            on_error=self._on_voice_run_error,
-        )
+            return False
+        coro = service.ask(text.strip(), correlation_id=correlation_id)
+        try:
+            self._bridge.submit(coro, on_error=self._on_voice_run_error)
+        except Exception as exc:
+            coro.close()
+            self._on_voice_run_error(exc)
+            return False
+        return True
 
     def _on_voice_run_error(self, exc: BaseException) -> None:
         from kiki.assistant import DuplicateCorrelationError, RunPausedError
@@ -1266,8 +1338,10 @@ class KikiApplication(Adw.Application):
             log.info("duplicate spoken event dropped")
             return
         if isinstance(exc, RunPausedError):
+            self._follow_up.cancel()
             self._say_paused()
             return
+        self._follow_up.cancel()
         self._on_harness_bridge_error(exc)
 
     def _say_paused(self) -> None:
@@ -1275,6 +1349,7 @@ class KikiApplication(Adw.Application):
             self._speech.say("Ich mache gerade Pause. Bitte später nochmal.")
 
     def _voice_failed(self, exc: BaseException) -> None:
+        self._follow_up.cancel()
         self._voice_busy = False
         if self._recorder.recording:
             self._recorder.stop()
@@ -1311,17 +1386,25 @@ class KikiApplication(Adw.Application):
     def _on_stream_done(self, **payload: object) -> None:
         ok = bool(payload.get("ok", True))
         if not ok:
+            self._follow_up.cancel()
             return
+        self._follow_up.mark_terminal()
+        delivered = self._follow_up.mark_response_delivered()
         text = payload.get("text")
         if self._settings.tts_allowed() and self._speech is not None:
             if not self._settings.tts.stream_sentences and isinstance(text, str) and text.strip():
                 self._speech.feed(text)
             self._speech.flush()
+            if delivered and not self._speech.active:
+                self._try_arm_follow_up()
+            return
+        if delivered and self._try_arm_follow_up():
             return
         if self._machine.state is not CharacterState.PAUSED:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
 
     def _on_stream_error(self, **_payload: object) -> None:
+        self._follow_up.cancel()
         self.stop_speech()
         self._machine.set(CharacterState.ERROR)
 
@@ -1365,6 +1448,8 @@ class KikiApplication(Adw.Application):
         self._machine.set(CharacterState.SPEAKING, hold_ms=0)
 
     def _on_tts_idle(self) -> None:
+        if self._try_arm_follow_up():
+            return
         self._resume_wake()
         if self._machine.state in {CharacterState.SPEAKING, CharacterState.THINKING}:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
@@ -1401,6 +1486,7 @@ class KikiApplication(Adw.Application):
 
     def _on_shutdown(self, *_args: object) -> None:
         self._close_harness()
+        self._follow_up.cancel()
         self.stop_speech()
         self._close_voice_controller()
         # Release the microphone and the poll loop before the bridge goes away.

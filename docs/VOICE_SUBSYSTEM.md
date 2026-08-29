@@ -83,6 +83,21 @@ kiki --prepare-voice-model
 ./scripts/setup-local-model.sh --voice
 ```
 
+### Weckwort-Dialog und Follow-up
+
+Das optionale Weckwort bleibt standardmäßig deaktiviert. Ist es eingeschaltet,
+öffnet „KIKI“ genau ein lokales Befehlsfenster. Nach der vollständig
+ausgegebenen Antwort kann der Listener einmalig direkt weiterhören; Stille bis
+zum konfigurierten `command_timeout_s` beendet das Follow-up und schaltet zurück
+auf die Weckwortsuche.
+
+Der `FollowUpTurn` verlangt dafür drei Signale: Der Dialog wurde per Weckwort
+gestartet, der Assistant-Run ist terminal und seine finale Antwort wurde
+ausgegeben. Zwischenansagen für Freigaben, proaktive Hinweise, Begrüßungen und
+getippte Chats können deshalb kein Follow-up-Mikrofon öffnen. Der Vosk-Erkenner
+bleibt lokal, schreibt kein Audio und verwirft Text außerhalb eines expliziten
+Befehls- oder Follow-up-Fensters.
+
 ---
 
 ## 🔊 Qwen3-TTS GPU-Dienst

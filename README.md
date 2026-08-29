@@ -264,6 +264,8 @@ kiki-setup-model
 - **Offline & Sicher:** Lokale Spracherkennung über Fedoras Vosk-0.3.50-Laufzeit.
 - **Push-to-Talk:** Standardmäßig Leertaste/Button gedrückt halten.
 - **Weckwort „KIKI“:** Optional in den Einstellungen aktivierbar.
+- **Direktes Follow-up:** Nach einer per Weckwort gestarteten Antwort hört KIKI
+  für genau eine weitere Äußerung zu. Bei Stille wartet sie wieder auf „KIKI“.
 - **Automatisches Modell-Setup:**
   ```bash
   kiki --prepare-voice-model

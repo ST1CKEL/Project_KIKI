@@ -132,6 +132,9 @@ phrases = ["kiki"]
 cooldown_ms = 2000
 # Give up on a spoken command after this long and go back to waiting.
 command_timeout_s = 12
+# After KIKI answers a wake-word command, accept one direct follow-up during
+# the same timeout window. Silence returns to normal wake-word matching.
+follow_up = true
 
 [voice.response_policy]
 # What KIKI reads out loud. She always speaks the whole answer — there is no

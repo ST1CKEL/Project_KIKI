@@ -194,9 +194,19 @@ class PreferencesWindow(Adw.PreferencesDialog):
         )
         wake.set_active(self._settings.voice.wake.enabled)
         wake.connect("notify::active", lambda r, *_: self._set_wake(r.get_active()))
+        follow_up = Adw.SwitchRow(title="Direkte Rückfragen erlauben")
+        follow_up.set_subtitle(
+            "Nach einer gesprochenen Antwort kurz ohne neues „KIKI“ weiterhören. "
+            "Funktioniert nur bei aktiviertem Weckwort und bleibt vollständig lokal."
+        )
+        follow_up.set_active(self._settings.voice.wake.follow_up)
+        follow_up.connect(
+            "notify::active", lambda r, *_: self._set_follow_up(r.get_active())
+        )
         voice.add(vrow)
         voice.add(auto)
         voice.add(wake)
+        voice.add(follow_up)
         tts = Adw.PreferencesGroup(title="Sprachausgabe")
         tts.set_description(
             "Antworten liest ein lokaler Dienst vor: Qwen3-TTS 0.6B CustomVoice auf der GPU. "
@@ -721,6 +731,10 @@ class PreferencesWindow(Adw.PreferencesDialog):
 
     def _set_wake(self, value: bool) -> None:
         self._settings.voice.wake.enabled = value
+        self._persist()
+
+    def _set_follow_up(self, value: bool) -> None:
+        self._settings.voice.wake.follow_up = value
         self._persist()
 
     def _set_voice_auto(self, value: bool) -> None:

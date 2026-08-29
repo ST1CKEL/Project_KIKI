@@ -201,6 +201,7 @@ KIKI kann Bilder und Bildschirmfotos analysieren, um dir bei visuellen Aufgaben,
 ### Spracheingabe (STT)
 - **Push-to-Talk:** Halte das Mikrofon-Symbol im Chat oder die konfigurierte Taste gedrückt, sprich deine Frage und lasse die Taste los.
 - **Weckwort „KIKI“:** In den Einstellungen kann die permanente Weckworterkennung aktiviert werden (standardmäßig deaktiviert zur Ressourcenschonung).
+- **Direkte Rückfragen:** Nach KIKIs Antwort kannst du innerhalb des kurzen Hörfensters direkt weitersprechen. Ohne Spracheingabe endet das Fenster automatisch; deaktivierbar unter **Privatsphäre → Sprache**.
 - **Offline-Sicherheit:** Die Spracherkennung läuft zu 100 % lokal über das deutsche Vosk-Modell. Keine Sprachdaten verlassen deinen Rechner.
 
 ### Sprachausgabe (TTS)

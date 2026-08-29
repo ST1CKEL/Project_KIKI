@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from kiki.voice.wake import (
@@ -171,6 +173,44 @@ def test_capture_times_out_back_to_waiting() -> None:
     # A late utterance is treated as ordinary speech, not as a command.
     listener.handle("das war nur ein gespräch", now=21.0)
     assert commands == []
+
+
+def test_follow_up_arms_exactly_one_direct_utterance() -> None:
+    stream = FakeStream([])
+    listener, detected, commands = _listener(stream=stream)
+
+    assert listener.capture_next() is True
+    assert listener.state is ListenerState.CAPTURING
+    assert detected == []
+    assert stream.resets == 1
+
+    listener.handle("und wie viel ist noch frei", now=time.monotonic())
+
+    assert commands == ["und wie viel ist noch frei"]
+    assert listener.state is ListenerState.WAITING
+
+
+def test_capture_timeout_is_reported_once() -> None:
+    timed_out: list[str] = []
+    listener, _detected, commands = _listener(
+        command_timeout_s=2,
+        on_timeout=lambda: timed_out.append("timeout"),
+    )
+    listener.handle("kiki", now=0.0)
+
+    listener.handle(None, now=3.0)
+    listener.handle(None, now=4.0)
+
+    assert timed_out == ["timeout"]
+    assert commands == []
+
+
+def test_paused_listener_refuses_a_follow_up_window() -> None:
+    listener, _detected, _commands = _listener()
+    listener.pause()
+
+    assert listener.capture_next() is False
+    assert listener.state is ListenerState.WAITING
 
 
 def test_empty_command_is_still_delivered() -> None:
