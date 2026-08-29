@@ -44,7 +44,7 @@ KIKI ist eine **GTK4/libadwaita-Anwendung** mit einem **GI-freien Kern**. Die Fi
 | TTS | Eigener Dienst `kiki-tts` mit **Qwen3-TTS-12Hz-0.6B-CustomVoice** auf CUDA. Default-Stimme **Serena**, Sprache **German**. GTK spielt WAV über PipeWire; Syntheseaufträge sind abbrechbar und verspätete WAVs werden verworfen. Loopback only. |
 | Tools | Default Deny. Unbekannte Namen und eine Hard-Deny-Liste (`run_shell`, `sudo`, …) laufen nie. |
 | Modell-Tool-Use | **An** (Phase 2A). Nur Tools mit `model_callable = true` sind für das Modell sichtbar; Policy, Freigabekarte und Audit bleiben unverändert auf dem Pfad. |
-| Vertrauensstufe | `tools.autonomy`: `strict` (lesen), `balanced` (Default: + deklarierte Steuerung), `trusted` (+ Öffnen in registrierten Workspaces). Schreibend und extern fragen auf **jeder** Stufe. |
+| Vertrauensstufe | `tools.autonomy`: `strict` (lesen), `balanced` (Default: + deklarierte Steuerung), `trusted` (+ Öffnen in registrierten Workspaces), `jarvis` (opt-in: alles unbeaufsichtigt, auch Schreiben/Extern — Phase 3A). Außerhalb `jarvis` fragen Schreiben und Extern auf jeder Stufe. |
 | Charakter | `renderer = "frames"` in `manifest.toml`. Später lottie/spine/live2d ohne Chat-Umbau. |
 | App-ID | `io.github.projectkiki.Kiki` |
 | Lizenz | MIT |
@@ -119,6 +119,10 @@ GNOME  auf Fedora 44 nutzt Wayland. Das ist die größte technische Grenze eines
 - Gedächtnis: bestätigte Erinnerungen im Systemprompt, in den Einstellungen löschbar (Phase 2C)
 - Umschaltbare Persona, feste Regeln davon getrennt (Phase 2D)
 - Proaktive Meldungen zu Akku und Speicher, mit Ruhezeiten (Phase 2E)
+- Desktop-Steuerung: MPRIS-Medien, Lautstärke (pactl), Helligkeit (GNOME/KDE-Kaskade), App-Start über .desktop-Einträge, Bildschirm sperren (Phase 3A)
+- Jarvis-Modus `tools.autonomy = "jarvis"`: unbeaufsichtigte Ausführung auf allen Risikostufen, opt-in (Phase 3A)
+- Freigegebene Wenn-Dann-Routinen (Akku/Speicher → Werkzeugaufruf), in den Einstellungen verwaltbar (Phase 3B)
+- System & Netzwerk: WLAN-Gerät schalten, Netzwerke anzeigen, VPN verbinden/trennen (NetworkManager), Ruhezustand/Neustart/Ausschalten (logind) (Phase 3C)
 
 ### Phase 2A — Agent-Loop
 
@@ -536,6 +540,102 @@ Akkubetrieb) und `disk` (Warnung ab 90 %, dringend ab 96 %). Kalender- und
 Build-Watcher fehlen noch; der Kalender bräuchte eine neue
 `evolution-data-server`-Anbindung.
 
+### Phase 3A — Jarvis-Modus und Desktop-Steuerung
+
+`AutonomyLevel.JARVIS` erweitert die Tabelle unbeaufsichtigter Risikostufen um
+WRITE und EXTERNAL — die einzige Stelle, an der beide vorkommen. Es ist eine
+bewusste Nutzerentscheidung (Einstellungen → Vertrauensstufe, nie Default),
+kein Zustand, in den die Anwendung von selbst gerät. Was auch in dieser Stufe
+weiterhin stoppt: die Hard-Deny-Liste, unbekannte Tools, der Panic-Schalter,
+der Integrationsschalter, das `model_callable`-Gate — und jedes Tool, dessen
+Autor `auto_allow` nicht gesetzt hat. Dieses Autoren-Veto rangiert über jeder
+Stufe; `routines.create`, `routines.delete`, Zwischenablage und Gedächtnis
+behalten ihre Karte daher selbst im Jarvis-Modus.
+
+Der `Origin.USER`-Pfad ist unverändert: Ein Klick fragt so oft wie vorher.
+Der Modus weitet, was das *Modell* entscheiden darf, nicht was ein Dialog
+überspringt.
+
+Fünf neue Skills erreichen den Desktop über dieselbe Werkzeug-Schicht wie
+alles andere (ToolSpec → Policy → Executor → Audit):
+
+| Skill | Werkzeuge | Risiko | Weg |
+|---|---|---|---|
+| `media_control` | `media.status`, `media.play_pause/next/previous/stop` | READ/CONTROL | MPRIS über den Sitzungsbus; `Can*`-Antworten des Players werden respektiert |
+| `audio_control` | `audio.volume_get/set`, `audio.mute` | READ/CONTROL | `pactl` mit festem argv, numerisch validiert, `LC_ALL=C` gegen Locale-Fallen |
+| `display_control` | `display.brightness_get/set` | READ/CONTROL | GNOME-SettingsDaemon first, Plasma-6.3+-Displays als Fallback (kein gemeinsames API beider Desktops) |
+| `app_launch` | `app.list`, `app.open` | READ/LAUNCH | Index aus den zwei XDG-Verzeichnissen; Start nur über `gio launch <datei>`, kein Exec-Parsen |
+| `session_control` | `session.lock` | CONTROL | `org.freedesktop.ScreenSaver`, Fallback `org.gnome.ScreenSaver` |
+
+D-Bus-Zugriff liegt in `kiki/platform/dbus.py` hinter kleinen Klassen, die
+Tests ersetzen können; kein Test braucht einen echten Bus. Suspend, Reboot,
+Netzwerk und Pakete sind bewusst nicht dabei — sie unterbrechen KIKI selbst
+oder stehen auf der Hard-Deny-Liste und bleiben ein eigener Entschluss.
+
+### Phase 3B — Freigegebene Routinen
+
+Routinen sind die einzige Form, in der KIKI ohne Ansprache **handelt**. Ein
+Rezept paart eine Messgröße (`battery.percent`, `disk.used_percent`) mit einem
+gespeicherten Werkzeugaufruf:
+
+```
+Routine = Trigger (Metrik, Vergleich, Schwelle) + Tool-Name + Argumente + Cooldown
+```
+
+Der entscheidende Unterschied zum Watcher: Ein `Notice` bleibt Text, eine
+Routine darf handeln — aber nur das exakt bestätigte Rezept. `routines.create`
+zeigt die Karte mit Auslöser, Werkzeug, Argumenten und Abklingzeit wortwörtlich
+an; `auto_allow=False` sorgt dafür, dass diese Karte auf **jeder** Stufe
+erscheint, Jarvis eingeschlossen. Verwaltung über `routines.list/toggle/delete`
+oder die Einstellungsseite.
+
+Die Ausführung läuft durch denselben `ToolExecutor` wie alles andere, mit
+`Origin.ROUTINE`:
+
+- Policy: erlaubt nur Tools mit `auto_allow=True` (Autoren-Veto gilt). Eine
+  dauerhafte Verweigerung (Werkzeug weg, Freigabe entzogen) schaltet die
+  Routine ab, statt sie in jedem Tick erneut ins Audit zu schreiben.
+- Panic und Integrationsschalter werden bei jedem Tick neu gelesen.
+- Cooldown (Default 30 min) verhindert, dass eine festsitzende Messgröße ein
+  Werkzeug hämmert; `battery.percent` existiert nur im entladenden Zustand,
+  damit eine ladende Batterie keine Tiefstand-Routinen auslöst.
+- Das Audit trägt `Origin.ROUTINE`; die Messgrößen kommen aus denselben
+  Integrationen, die die Watcher lesen — keine zweite D-Bus-Fläche, kein Cache.
+
+### Phase 3C — System & Netzwerk
+
+Zwei weitere Skills erreichen die Maschine über den **Systembus** — die erste
+Stelle, an der KIKI über den eigenen Desktop hinausgreift:
+
+| Skill | Werkzeuge | Risiko | Weg |
+|---|---|---|---|
+| `network_control` | `network.wifi_list`, `network.wifi_set`, `network.vpn_list`, `network.vpn_connect`, `network.vpn_disconnect` | READ/CONTROL | NetworkManager D-Bus: Funkgerät über die Property `WirelessEnabled`, Verbindungen über `ActivateConnection`/`DeactivateConnection` per UUID |
+| `power_control` | `power.suspend`, `power.reboot`, `power.poweroff` | CONTROL/WRITE | logind `Suspend`/`Reboot`/`PowerOff`; polkit erlaubt der aktiven Sitzung alle drei ohne Passwort |
+
+Die Risikotrennung trägt die Abwägung: **Suspend** ist CONTROL — die Maschine
+schläft und wacht auf, es geht nichts verloren, „Schlafmodus“ soll einfach
+funktionieren. **Reboot und PowerOff** beenden alles Ungespeicherte, KIKI
+eingeschlossen, und sind WRITE: außerhalb des Jarvis-Modus immer Karte, im
+Jarvis-Modus genau der Handel, den die Stufe beschreibt. Login/Logout fehlen
+bewusst — sie beenden den KIKI-Prozess, bevor er Erfolg melden könnte.
+
+**SSID-Schutz gilt weiter — mit einer neuen Grenze.** Die passive Integration
+(`integrations/networkmanager.py`) meldet nach wie vor keine SSID: Sie läuft
+ungefragt auf jeder Statuskarte. Die Werkzeuge dagegen laufen, *weil der Nutzer
+nach Netzwerken gefragt hat* — da ist das Nennen der SSID die Antwort, nicht
+ein Leak. Die Grenze liegt damit zwischen „unggefragt ständig sichtbar“ und
+„auf Abruf“.
+
+**Verbindungen verbinden, nicht verändern.** Das Werkzeug aktiviert und
+deaktiviert vorhandene Verbindungen per UUID; die UUID kommt aus
+`network.vpn_list`. Verbindungen anlegen, bearbeiten oder Passwörter übergeben
+kann es nicht — das bleibt Systemeinstellungs-Territorium. GetSettings liefert
+ohnehin keine Secrets.
+
+`install_package` bleibt auf der Hard-Deny-Liste. Paketverwaltung ändert die
+Maschine grundlegend und braucht eine eigene Entschärfungsentscheidung mit
+eigenen Guardrails — nicht einfach ein weiteres Tool.
+
 ### Sicherheitsinvarianten seit 0.5.0
 
 - Eine Umsetzung akzeptiert nur eine erfolgreich beendete Plan-Session mit gleichem Workspace und unverändertem Aufgabentext; ihre `plan_session_id` bleibt an der Umsetzung gespeichert.
@@ -572,8 +672,10 @@ protokolliert, aber noch nicht einzeln angehalten und von KIKI freigegeben.
 - Automatisches Anreichern von Prompts mit Systemdaten — **eine** Ausnahme seit
   Phase 2C: der Gedächtnisblock, und darin steht nur vom Nutzer Freigegebenes
 - Root-Aktionen
-- Autonome Automationen. Seit Phase 2E darf KIKI sich von selbst **melden**,
-  aber weiterhin nichts von selbst **tun**.
+- Freie autonome Automationen. Seit Phase 2E darf KIKI sich von selbst
+  **melden**; seit Phase 3B darf sie exakt die Wenn-Dann-Rezepte ausführen,
+  die der Nutzer als Routine bestätigt hat. Alles andere tut sie weiterhin
+  nur auf Ansprache.
 
 ## 5. Charakter-Asset-Vertrag
 

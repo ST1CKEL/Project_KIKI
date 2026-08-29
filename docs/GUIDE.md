@@ -120,6 +120,59 @@ Neben normalen Chatgesprächen kannst du KIKI mit dem Präfix `/agent` direkte, 
 
 ---
 
+## 2.2 Desktop-Steuerung & Jarvis-Modus
+
+KIKI steuert den GNOME- oder KDE-Desktop direkt über den Chat oder per Sprache:
+
+| Funktion | Werkzeuge | Beispiele |
+|---|---|---|
+| **Medien** (MPRIS) | `media.status`, `media.play_pause`, `media.next`, `media.previous`, `media.stop` | „Was läuft gerade für Musik?“ · „Nächster Titel“ |
+| **Lautstärke** | `audio.volume_get`, `audio.volume_set`, `audio.mute` | „Stell die Lautstärke auf 30 Prozent“ · „Stumm“ |
+| **Helligkeit** | `display.brightness_get`, `display.brightness_set` | „Dimm das Display auf 60 Prozent“ |
+| **Anwendungen** | `app.list`, `app.open` | „Öffne Firefox“ · „Starte den Rechner (Calculator)“ |
+| **Sitzung** | `session.lock` | „Sperr den Bildschirm“ |
+| **Netzwerk** | `network.wifi_list`, `network.wifi_set`, `network.vpn_list`, `network.vpn_connect`, `network.vpn_disconnect` | „Welche WLANs gibt es?“ · „Schalt das WLAN aus“ · „Verbinde das VPN“ |
+| **Energie** | `power.suspend`, `power.reboot`, `power.poweroff` | „Schlafmodus“ · „Fahr den Rechner runter“ |
+
+Lesen (READ) und Steuern (CONTROL) führt KIKI in der Standardstufe `balanced`
+ohne Nachfrage aus — auch WLAN/VPN-Schaltung und Ruhezustand. Neustart und
+Ausschalten (WRITE) fragen außerhalb des Jarvis-Modus nach. Anwendungen starten (`LAUNCH`) klappt die Stufe `trusted`
+auf. Schreibendes und Externes zeigen — wie bisher — eine Freigabekarte.
+
+### Jarvis-Modus (experimentell)
+
+In den Einstellungen unter **Selbstständigkeit → Vertrauensstufe** kann
+**„… + Alles ohne Rückfragen (jarvis)“** gewählt werden. Dann handelt KIKI
+auch Schreibendes und Externes ohne Karte. Was auch dann weiter gilt:
+
+- Die Hard-Deny-Liste (`sudo`, freie Shell, `rm`, …) bleibt hart blockiert.
+- Der Panic-Schalter stoppt sofort alles, auch Jarvis-Aktionen.
+- Jede Ausführung landet weiterhin im Audit-Log.
+- Werkzeuge mit bewusster Bestätigungspflicht (Routinen anlegen/löschen,
+  Zwischenablage, Gedächtnis) zeigen auch im Jarvis-Modus ihre Karte.
+
+## 2.3 Routinen („Wenn–Dann“)
+
+Routinen sind die einzige Form, in der KIKI ohne Aufforderung handelt. Sag im
+Chat:
+
+> „Erstelle eine Routine: Wenn der Akku unter 15 Prozent fällt, spiel eine
+> Benachrichtigung.“
+
+KIKI zeigt daraufhin eine Freigabekarte mit dem **kompletten Rezept** —
+Auslöser, Werkzeug, Argumente und Abklingzeit. Erst deine Freigabe speichert
+die Routine. Sie feuert später genau so und ohne erneute Frage, mit einem
+Cooldown (Standard 30 Minuten) gegen Dauerfeuer. Der Panic-Schalter hält alle
+Routinen sofort an.
+
+Verwaltung: Einstellungen → Seite **Routinen** (Liste, Ein-/Ausschalten,
+Löschen) oder im Chat über `routines.list`, `routines.toggle`, `routines.delete`.
+
+Mögliche Auslöser heute: Akkustand im Entladebetrieb und belegter
+Heimat-Speicher (je Prozent, `lt`/`gt`/`eq`).
+
+---
+
 ## 3. Vision & Bildschirmfreigabe
 
 KIKI kann Bilder und Bildschirmfotos analysieren, um dir bei visuellen Aufgaben, Fehlermeldungen oder Code auf dem Bildschirm zu helfen.
@@ -188,6 +241,7 @@ KIKI folgt einem strikten Sicherheitsmodell (**Default Deny**):
 |---|---|
 | **Hard-Deny-Liste** | Befehle wie `sudo`, `su`, freie Shell-Strings (`sh -c`) werden ausnahmslos blockiert. |
 | **Audit-Log** | Alle Werkzeugaufrufe, Dateilesungen und Prozessstarts werden mit Zeitstempel protokolliert. |
+| **Routinen-Ursprung** | Jede Aktion trägt ihren Ursprung (`[user]`/`[model]`/`[routine]`) im Audit — nachvollziehbar, was ein Klick, was eine Modellentscheidung und was eine Routine war. |
 | **Panic-Button (🚨)** | Ein Klick auf das Not-Aus-Symbol (oder Tastenkombination) bricht sofort: <br>• Alle laufenden KI-Generierungen ab <br>• Die Sprachausgabe ab <br>• Alle vom Agenten gestarteten Prozesse ab |
 
 ---

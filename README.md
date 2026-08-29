@@ -277,6 +277,14 @@ Ausführliche Latenzanalysen und Architekturdetails: [docs/VOICE_SUBSYSTEM.md](d
 - **Klick-Durchlässigkeit:** Transparente Bereiche lassen Mausklicks durch, die Figur selbst bleibt interaktiv.
 - **Kontextmenü (Rechtsklick):** Schneller Zugriff auf Chat, Einstellungen, Coding-Sessions, Ruhemodus und Beenden.
 
+### Desktop-Steuerung & Jarvis-Modus
+- **Medien & Audio:** MPRIS-Steuerung (Play/Pause/Next + Metadaten), Lautstärke und Stummschaltung über `pactl`.
+- **Display & Sitzung:** Helligkeit über GNOME-/KDE-Sitzungsbus, Bildschirm sperren.
+- **Anwendungen starten:** Index aller installierten `.desktop`-Einträge, Start über `gio launch` — ohne Shell, ohne Modelltext im Kommando.
+- **Jarvis-Modus (experimentell):** Vertrauensstufe `jarvis` lässt KIKI auf allen Risikostufen ohne Rückfragen handeln; Hard-Deny-Liste, Panic-Schalter und Audit greifen weiterhin.
+- **System & Netzwerk:** WLAN-Gerät schalten und Netzwerke anzeigen (NetworkManager), bestehende VPN-/WireGuard-Verbindungen per UUID verbinden und trennen, Ruhezustand/Neustart/Ausschalten über logind.
+- **Freigegebene Routinen:** Wenn-Dann-Rezepte („Akku < 15 % → Aktion“), die einmal als komplette Karte bestätigt werden und dann ohne erneute Frage feuern — mit Cooldown, Panic-Stopp und Audit-Eintrag `routine`.
+
 ### Chat & Vision
 - **Streaming Markdown:** Formatierter Text, Code-Blöcke mit Ein-Klick-Kopieren, LaTeX-Formeln und Tabellen.
 - **Bildschirmfreigabe (Vision):** Screenshot über Wayland XDG Desktop Portal anfordern, um KIKI den Bildschirm oder ein bestimmtes Fenster zu zeigen.
