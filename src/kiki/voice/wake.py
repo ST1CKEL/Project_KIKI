@@ -10,13 +10,13 @@ produced the real sentences and not one stray "kiki" token.
 So the listener runs ordinary local recognition. That is a real privacy
 tradeoff, and these rules are what make it defensible:
 
-* Audio is never written to disk and never leaves the process.
-* While waiting, recognized text never leaves this module. It is matched
-  against the wake phrases and dropped — never stored, never logged, never
-  sent to a model.
+* Audio is never written to disk and never leaves the machine. While waiting,
+  recognized text never leaves this module. It is matched against the wake
+  phrases and dropped — never stored, never logged, never sent to a model.
 * Text escapes exactly once the wake word was heard: the **next** utterance is
-  handed over as the spoken command. Creating that boundary is the entire point
-  of a wake word.
+  handed over as the spoken command, together with its PCM passage so the
+  optional local whisper service can transcribe it far more accurately. That
+  PCM goes to the loopback STT service and nowhere else.
 * After an answered wake-word turn, the application may explicitly arm one
   follow-up utterance. Silence returns the listener to wake-word matching.
 * The feature is opt-in and off by default, the panic switch kills it, and the
@@ -308,7 +308,9 @@ class WakeWordListener:
     """Wake word, then the command after it, on one background thread.
 
     `on_detect` and `on_command` are invoked from that thread; callers are
-    responsible for hopping to the UI thread.
+    responsible for hopping to the UI thread. `on_command` receives the Vosk
+    transcript plus the raw PCM16 passage of the command utterance, so a
+    better second-stage recognizer can re-listen to exactly what was said.
     """
 
     def __init__(
@@ -320,7 +322,7 @@ class WakeWordListener:
         cooldown_ms: int = DEFAULT_COOLDOWN_MS,
         command_timeout_s: float = DEFAULT_COMMAND_TIMEOUT_S,
         on_detect: Callable[[], None],
-        on_command: Callable[[str], None],
+        on_command: Callable[[str, bytes], None],
         on_timeout: Callable[[], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
     ) -> None:
@@ -346,6 +348,11 @@ class WakeWordListener:
         self._state = ListenerState.WAITING
         self._cooldown_until = 0.0
         self._capture_deadline = 0.0
+        # PCM of the utterance currently being captured. Appended under
+        # `_stream_lock` on the listener thread, cleared on every path that
+        # leaves CAPTURING so TTS audio or stale speech can never leak into
+        # the next command.
+        self._capture_pcm: list[bytes] = []
 
     @property
     def phrases(self) -> tuple[str, ...]:
@@ -386,6 +393,7 @@ class WakeWordListener:
             # Audio heard while paused must not leak into the next utterance.
             with self._stream_lock:
                 self._stream.reset()
+                self._capture_pcm = []
                 self._paused.clear()
             self._state = ListenerState.WAITING
 
@@ -399,6 +407,7 @@ class WakeWordListener:
             return False
         with self._stream_lock:
             self._stream.reset()
+            self._capture_pcm = []
             self._state = ListenerState.CAPTURING
             self._capture_deadline = time.monotonic() + self._command_timeout
         return True
@@ -412,6 +421,7 @@ class WakeWordListener:
             thread.join(timeout=3)
         self._microphone.stop()
         self._stream.close()
+        self._capture_pcm = []
         self._state = ListenerState.WAITING
 
     def handle(self, text: str | None, *, now: float | None = None) -> None:
@@ -419,6 +429,7 @@ class WakeWordListener:
         moment = time.monotonic() if now is None else now
         if self._state is ListenerState.CAPTURING and moment > self._capture_deadline:
             self._state = ListenerState.WAITING
+            self._capture_pcm = []
             if self._on_timeout is not None:
                 self._on_timeout()
         if text is None:
@@ -426,7 +437,9 @@ class WakeWordListener:
         if self._state is ListenerState.CAPTURING:
             self._state = ListenerState.WAITING
             self._cooldown_until = moment + self._cooldown
-            self._on_command(text.strip())
+            pcm = b"".join(self._capture_pcm)
+            self._capture_pcm = []
+            self._on_command(text.strip(), pcm)
             return
         if moment < self._cooldown_until:
             return
@@ -452,6 +465,8 @@ class WakeWordListener:
                     self.handle(None)
                     continue
                 with self._stream_lock:
+                    if self._state is ListenerState.CAPTURING:
+                        self._capture_pcm.append(chunk)
                     heard = self._stream.feed(chunk)
                 self.handle(heard)
         except Exception as exc:  # pragma: no cover - hardware failure path

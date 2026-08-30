@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 
@@ -93,6 +94,7 @@ def _check(*, strict: bool = False) -> int:
     from kiki.config.settings import load_settings
     from kiki.paths import cache_dir, config_dir, config_path, state_dir, user_data_dir
     from kiki.voice.stt import vosk_model_ready, vosk_runtime_available
+    from kiki.voice.stt_client import stt_health
     from kiki.voice.system_tts import system_tts_available
 
     config_dir()
@@ -120,9 +122,11 @@ def _check(*, strict: bool = False) -> int:
     voice_runtime = vosk_runtime_available()
     voice_model = vosk_model_ready(settings.voice.stt_model)
     tts_fallback = system_tts_available()
+    stt_service = asyncio.run(stt_health(settings.voice.stt_service, timeout=1.5))
     print(f"voice_vosk={'ready' if voice_runtime else 'missing'}")
     print(f"voice_model={'ready' if voice_model else 'missing'}")
     print(f"tts_fallback={'ready' if tts_fallback else 'missing'}")
+    print(f"stt_service={'ready' if stt_service.ok and stt_service.ready else 'missing'}")
     print(f"workspace_roots={len(settings.workspaces.allowed_roots)}")
     print(f"opencode={settings.agents.opencode_binary}")
     print(f"plan_first={settings.agents.plan_first}")

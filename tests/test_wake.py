@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -40,14 +41,14 @@ class FakeStream(UtteranceStream):
         return self._queue.pop(0) if self._queue else None
 
 
-def _listener(**kwargs) -> tuple[WakeWordListener, list[str], list[str]]:
+def _listener(**kwargs) -> tuple[WakeWordListener, list[str], list[tuple[str, bytes]]]:
     detected: list[str] = []
-    commands: list[str] = []
+    commands: list[tuple[str, bytes]] = []
     params = dict(
         stream=FakeStream([]),
         microphone=object(),
         on_detect=lambda: detected.append("wake"),
-        on_command=commands.append,
+        on_command=lambda text, pcm: commands.append((text, pcm)),
     )
     params.update(kwargs)
     return WakeWordListener(**params), detected, commands
@@ -133,7 +134,7 @@ def test_wake_then_command_is_handed_over() -> None:
     assert listener.state is ListenerState.CAPTURING
 
     listener.handle("wie voll ist die platte", now=2.0)
-    assert commands == ["wie voll ist die platte"]
+    assert commands == [("wie voll ist die platte", b"")]
     assert listener.state is ListenerState.WAITING
 
 
@@ -150,7 +151,7 @@ def test_cooldown_suppresses_an_immediate_second_wake() -> None:
 
     listener.handle("kiki", now=0.0)
     listener.handle("mach das licht an", now=0.5)
-    assert commands == ["mach das licht an"]
+    assert commands == [("mach das licht an", b"")]
 
     # Inside the cooldown that follows the command.
     listener.handle("kiki", now=1.0)
@@ -186,7 +187,7 @@ def test_follow_up_arms_exactly_one_direct_utterance() -> None:
 
     listener.handle("und wie viel ist noch frei", now=time.monotonic())
 
-    assert commands == ["und wie viel ist noch frei"]
+    assert commands == [("und wie viel ist noch frei", b"")]
     assert listener.state is ListenerState.WAITING
 
 
@@ -218,7 +219,7 @@ def test_empty_command_is_still_delivered() -> None:
     listener, _detected, commands = _listener()
     listener.handle("kiki", now=0.0)
     listener.handle("", now=1.0)
-    assert commands == [""]
+    assert commands == [("", b"")]
     assert listener.state is ListenerState.WAITING
 
 
@@ -253,3 +254,70 @@ def test_custom_phrase_replaces_the_default() -> None:
     assert detected == []
     listener.handle("computer", now=1.0)
     assert detected == ["wake"]
+
+
+# --- command PCM capture -----------------------------------------------------
+
+
+class ScriptedMicrophone:
+    """Hands out scripted chunks, then idles like a real mic would."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def read(self, timeout_ms: int = 200) -> bytes:
+        with self._lock:
+            if self._chunks:
+                return self._chunks.pop(0)
+        time.sleep(0.005)
+        return b""
+
+
+def test_command_pcm_is_delivered_with_the_transcript() -> None:
+    chunks = [b"c1", b"c2", b"c3", b"c4"]
+    stream = FakeStream([None, "kiki", None, "öffne thunderbird"])
+    received: list[tuple[str, bytes]] = []
+    listener = WakeWordListener(
+        stream=stream,
+        microphone=ScriptedMicrophone(chunks),
+        on_detect=lambda: None,
+        on_command=lambda text, pcm: received.append((text, pcm)),
+    )
+    listener.start()
+    try:
+        for _ in range(200):
+            if received:
+                break
+            time.sleep(0.01)
+    finally:
+        listener.stop()
+
+    assert received == [("öffne thunderbird", b"c3c4")]
+
+
+def test_paused_audio_never_leaks_into_the_next_command() -> None:
+    received: list[tuple[str, bytes]] = []
+    stream = FakeStream(["kiki"])
+    listener = WakeWordListener(
+        stream=stream,
+        microphone=ScriptedMicrophone([b"wake-audio"]),
+        on_detect=lambda: None,
+        on_command=lambda text, pcm: received.append((text, pcm)),
+    )
+    listener.handle("kiki", now=0.0)
+    assert listener.state is ListenerState.CAPTURING
+
+    # Speech heard while KIKI herself speaks is drained, not matched.
+    listener.pause()
+    listener.resume()
+    assert listener.capture_next() is True
+
+    listener.handle("", now=1.0)
+    assert received == [("", b"")]

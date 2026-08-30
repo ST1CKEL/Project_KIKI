@@ -20,6 +20,7 @@ VALID_ANCHORS = ("bottom-right", "bottom-left", "top-right", "top-left")
 # Must mirror kiki.voice.stt.VOSK_MODELS; config may only pick pinned models.
 DEFAULT_STT_MODEL = "vosk-model-small-de-0.15"
 VALID_STT_MODELS = ("vosk-model-small-de-0.15", "vosk-model-de-0.21")
+DEFAULT_STT_SERVICE_URL = "http://127.0.0.1:18775"
 VALID_TTS_SPEAKERS = (
     "Vivian",
     "Serena",
@@ -252,6 +253,12 @@ class VoiceSettings:
     # the wake name on real voices; the large model hears it but costs a
     # ~1.9 GB download and several GB of RAM.
     stt_model: str = DEFAULT_STT_MODEL
+    # Optional faster-whisper service (scripts/setup-stt.sh). Vosk stays the
+    # streaming ear; when this service answers, the captured audio passage is
+    # transcribed there instead — far better at proper nouns. If it is down,
+    # the Vosk text is used and no turn is ever blocked on it.
+    stt_service: str = DEFAULT_STT_SERVICE_URL
+    stt_fallback_vosk: bool = True
     wake: WakeSettings = field(default_factory=WakeSettings)
     response_policy: ResponsePolicySettings = field(default_factory=ResponsePolicySettings)
 
@@ -411,6 +418,9 @@ class Settings:
             "voice": {
                 "enabled": self.voice.enabled,
                 "auto_send": self.voice.auto_send,
+                "stt_model": self.voice.stt_model,
+                "stt_service": self.voice.stt_service,
+                "stt_fallback_vosk": self.voice.stt_fallback_vosk,
                 "wake": {
                     "enabled": self.voice.wake.enabled,
                     "phrases": list(self.voice.wake.phrases),
@@ -503,6 +513,8 @@ def settings_from_mapping(data: dict[str, Any]) -> Settings:
     stt_model = str(voice.get("stt_model", DEFAULT_STT_MODEL)).strip() or DEFAULT_STT_MODEL
     if stt_model not in VALID_STT_MODELS:
         stt_model = DEFAULT_STT_MODEL
+    stt_service = str(voice.get("stt_service", DEFAULT_STT_SERVICE_URL)).strip() or DEFAULT_STT_SERVICE_URL
+    stt_service = _require_http_url(stt_service, "voice.stt_service")
 
     disk = integ.get("disk", {})
     return Settings(
@@ -581,6 +593,8 @@ def settings_from_mapping(data: dict[str, Any]) -> Settings:
             enabled=bool(voice.get("enabled", True)),
             auto_send=bool(voice.get("auto_send", True)),
             stt_model=stt_model,
+            stt_service=stt_service,
+            stt_fallback_vosk=bool(voice.get("stt_fallback_vosk", True)),
             wake=_parse_wake(voice.get("wake") or {}),
             response_policy=_parse_response_policy(voice.get("response_policy") or {}),
         ),

@@ -21,6 +21,7 @@ from kiki.config.settings import Settings
 from kiki.platform.capabilities import detect_capabilities
 from kiki.storage.secrets import MemorySecretStore
 from kiki.voice.stt import vosk_model_ready, vosk_runtime_available
+from kiki.voice.stt_client import stt_health
 from kiki.voice.system_tts import system_tts_available
 from kiki.voice.tts_client import tts_health
 
@@ -269,6 +270,35 @@ async def _service_checks(settings: Settings) -> list[DoctorCheck]:
             "lokaler TTS-Dienst bereit" if status is DoctorStatus.READY else "lokaler TTS-Dienst nicht bereit"
         )
         checks.append(DoctorCheck("tts_service", status, detail))
+
+    # The whisper service is optional: without it KIKI falls back to the Vosk
+    # transcript, so "not reachable" is LIMITED, never MISSING.
+    if not settings.voice_allowed():
+        checks.append(
+            DoctorCheck("stt_service", DoctorStatus.LIMITED, "Spracheingabe deaktiviert")
+        )
+    elif not _is_loopback(settings.voice.stt_service):
+        checks.append(
+            DoctorCheck(
+                "stt_service",
+                DoctorStatus.LIMITED,
+                "externer STT-Dienst wird nicht kontaktiert",
+            )
+        )
+    else:
+        try:
+            health = await stt_health(settings.voice.stt_service, timeout=1.5)
+        except Exception:
+            health = None
+        status = (
+            DoctorStatus.READY if health is not None and health.ok and health.ready else DoctorStatus.LIMITED
+        )
+        detail = (
+            "lokaler Whisper-Dienst bereit"
+            if status is DoctorStatus.READY
+            else "optionaler STT-Dienst nicht bereit (Vosk-Text wird genutzt)"
+        )
+        checks.append(DoctorCheck("stt_service", status, detail))
     return checks
 
 

@@ -119,6 +119,13 @@ interactive = true
 # Push-to-talk / toggle.
 enabled = true
 auto_send = true
+# Optional local faster-whisper service (scripts/setup-stt.sh). Vosk stays the
+# streaming ear for the wake word and utterance boundaries; while this service
+# answers, the captured audio passage is transcribed there — far more reliable
+# at proper nouns ("Thunderbird") than any Vosk model. If the service is down,
+# the Vosk text is used and no voice turn is blocked on it.
+stt_service = "http://127.0.0.1:18775"
+stt_fallback_vosk = true
 # Local Vosk model for speech-to-text. The small default is a ~45 MB download
 # with a small footprint, but on real voices it often mishears the wake name
 # ("Kiki" becomes "gekippt" or "elke gilt") and then the wake word never

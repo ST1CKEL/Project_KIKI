@@ -83,6 +83,25 @@ kiki --prepare-voice-model
 ./scripts/setup-local-model.sh --voice
 ```
 
+### Sprachverständnis (optionaler faster-whisper-Dienst)
+
+Vosk hört und segmentiert — Weckwort, Äußerungsende und Notfall-Text können nur
+aus dem Streamer kommen. Sein Text verhört sich aber bei Eigennamen
+(„Thunderbird" wurde als „sander bord" verstanden). Deshalb kann ergänzend ein
+zweiter lokaler Dienst laufen:
+
+```bash
+kiki-setup-stt        # oder im Quellbaum: ./scripts/setup-stt.sh
+```
+
+`kiki-stt` (Port 18775, eigene `stt-venv` mit faster-whisper/ctranslate2)
+bekommt die exakte PCM-Passage des erkannten Befehls und schreibt sie ab.
+Die App nutzt das Whisper-Transkript, sobald der Dienst antwortet, und fällt
+sonst sofort auf den Vosk-Text zurück (30-s-Cooldown nach Ausfall) — kein
+Sprachdialog wartet auf den Dienst. Konfiguration: `[voice] stt_service` und
+`[voice] stt_fallback_vosk`. Audio verlässt das Gerät dabei nie: Der Dienst
+bindet ausschließlich an Loopback.
+
 ### Weckwort-Dialog und Follow-up
 
 Das optionale Weckwort bleibt standardmäßig deaktiviert. Ist es eingeschaltet,

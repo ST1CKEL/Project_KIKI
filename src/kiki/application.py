@@ -83,8 +83,9 @@ from kiki.voice.answer import VoiceAnswerDelivery, plan_voice_answer
 from kiki.voice.director import SpeechDirector
 from kiki.voice.follow_up import FollowUpTurn
 from kiki.voice.recorder import AudioRecorder, RecorderError
-from kiki.voice.stt import SpeechError, ensure_vosk_model, transcribe_wav, vosk_model_ready
+from kiki.voice.stt import SpeechError, ensure_vosk_model, vosk_model_ready
 from kiki.voice.system_tts import synthesize_system_wav
+from kiki.voice.transcription import SpokenTranscriber
 from kiki.voice.tts.policy import VoicePolicyConfig, VoiceResponsePolicy
 from kiki.voice.tts_client import TtsError, synthesize_wav
 from kiki.voice.tts_player import PipeWirePlayer
@@ -143,6 +144,7 @@ class KikiApplication(Adw.Application):
         self._speech: SpeechDirector | None = None
         self._tts_remote_retry_after = 0.0
         self._tts_remote_error = ""
+        self._transcriber = SpokenTranscriber(self._settings)
         self._session_service: SessionService | None = None
         self._coding: CodingSessionWindow | None = None
         self._ws_manager: WorkspaceManagerWindow | None = None
@@ -1173,7 +1175,9 @@ class KikiApplication(Adw.Application):
                 cooldown_ms=wake.cooldown_ms,
                 command_timeout_s=wake.command_timeout_s,
                 on_detect=lambda: GLib.idle_add(self._on_wake_detected),
-                on_command=lambda text: GLib.idle_add(self._on_wake_command, text),
+                on_command=lambda text, pcm: GLib.idle_add(
+                    self._on_wake_command, text, pcm
+                ),
                 on_timeout=lambda: GLib.idle_add(self._on_wake_timeout),
                 on_error=lambda exc: GLib.idle_add(self._on_wake_error, exc),
             )
@@ -1230,19 +1234,44 @@ class KikiApplication(Adw.Application):
         self._toast("KIKI hört. Sag deine Frage.")
         return False
 
-    def _on_wake_command(self, text: str) -> bool:
+    def _on_wake_command(self, text: str, pcm: bytes) -> bool:
         if self._chat is not None:
             self._chat.set_listening(False)
         if self._machine.state is CharacterState.LISTENING:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
         self._follow_up.begin(enabled=self._follow_up_allowed())
         # One captured command is one spoken event, minted at the source.
-        started = self._route_spoken_text(
-            text, correlation_id=f"wake-{uuid.uuid4().hex[:12]}"
+        started = self._begin_wake_transcription(
+            text, pcm, correlation_id=f"wake-{uuid.uuid4().hex[:12]}"
         )
         if not started:
             self._follow_up.cancel()
         return False
+
+    def _begin_wake_transcription(
+        self, text: str, pcm: bytes, *, correlation_id: str
+    ) -> bool:
+        """Route a captured wake command through the whisper transcriber.
+
+        The transcriber answers with the better text when the service is up
+        and with the Vosk text when it is not — routing always continues.
+        """
+
+        async def _run():
+            return await self._transcriber.from_pcm(text, pcm)
+
+        self._bridge.submit(
+            _run(),
+            on_success=lambda final: self._on_wake_transcript(
+                final, correlation_id=correlation_id
+            ),
+            on_error=self._voice_failed,
+        )
+        return True
+
+    def _on_wake_transcript(self, text: str, *, correlation_id: str) -> None:
+        if not self._route_spoken_text(text, correlation_id=correlation_id):
+            self._follow_up.cancel()
 
     def _on_wake_timeout(self) -> bool:
         """Close the visible listening state after wake or follow-up silence."""
@@ -1299,11 +1328,7 @@ class KikiApplication(Adw.Application):
         self._machine.set(CharacterState.THINKING, hold_ms=0)
 
         async def _run():
-            return await asyncio.to_thread(
-                transcribe_wav,
-                path,
-                model_id=self._settings.voice.stt_model,
-            )
+            return await self._transcriber.from_wav(path)
 
         # One recording is one spoken event: the id is minted where the event
         # is born and travels with its transcript, so a delivery that fires

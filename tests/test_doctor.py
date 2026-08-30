@@ -69,6 +69,7 @@ def test_local_services_are_pinged_without_exposing_health_details(
     monkeypatch,
 ) -> None:
     from kiki.ai.provider import ProviderHealth
+    from kiki.voice.stt_client import SttHealth
     from kiki.voice.tts_client import TtsHealth
 
     settings = Settings()
@@ -88,14 +89,21 @@ def test_local_services_are_pinged_without_exposing_health_details(
         assert timeout == 1.5
         return TtsHealth(ok=True, ready=True, detail="internal detail")
 
+    async def healthy_stt(base_url: str, *, timeout: float) -> SttHealth:
+        assert base_url == settings.voice.stt_service
+        assert timeout == 1.5
+        return SttHealth(ok=True, ready=True, detail="internal detail")
+
     monkeypatch.setattr(doctor, "create_provider", lambda *_args: LocalProvider())
     monkeypatch.setattr(doctor, "tts_health", healthy_tts)
+    monkeypatch.setattr(doctor, "stt_health", healthy_stt)
 
     checks = asyncio.run(doctor._service_checks(settings))
 
     assert [(check.name, check.status) for check in checks] == [
         ("llm", DoctorStatus.READY),
         ("tts_service", DoctorStatus.READY),
+        ("stt_service", DoctorStatus.READY),
     ]
     assert all("detail" not in check.detail for check in checks)
 

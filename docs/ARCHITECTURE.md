@@ -42,6 +42,7 @@ KIKI ist eine **GTK4/libadwaita-Anwendung** mit einem **GI-freien Kern**. Die Fi
 | Secrets | nur libsecret / GNOME Keyring. Kein Datei-Fallback. |
 | KI-Default | **Ollama** lokal mit `qwen3-vl:4b` (Deutsch + Vision, ~3,3 GB). `qwen3-vl:8b` ist das optionale Qualitätsprofil; der kleinere Default verhindert erzwungene Modell-Downloads bei Updates. Optional OpenAI-kompatibel; empfohlener externer Dienst: **SpaceXAI** (`https://api.x.ai/v1`, `grok-4.5`). |
 | TTS | Eigener Dienst `kiki-tts` mit **Qwen3-TTS-12Hz-0.6B-CustomVoice** auf CUDA. Default-Stimme **Serena**, Sprache **German**. GTK spielt WAV über PipeWire; Syntheseaufträge sind abbrechbar und verspätete WAVs werden verworfen. Loopback only. |
+| STT | Vosk hört und segmentiert in der App (Weckwort, Äußerungsende, Notfall-Text). Optional transkribiert der Dienst `kiki-stt` (**faster-whisper**, eigene `stt-venv`, Port 18775) die erkannte Audio-Passage deutlich präziser; ist er aus, wird der Vosk-Text genutzt. Loopback only. |
 | Tools | Default Deny. Unbekannte Namen und eine Hard-Deny-Liste (`run_shell`, `sudo`, …) laufen nie. |
 | Modell-Tool-Use | **An** (Phase 2A). Nur Tools mit `model_callable = true` sind für das Modell sichtbar; Policy, Freigabekarte und Audit bleiben unverändert auf dem Pfad. |
 | Vertrauensstufe | `tools.autonomy`: `strict` (lesen), `balanced` (Default: + deklarierte Steuerung), `trusted` (+ lokales Öffnen in registrierten Workspaces), `jarvis` (opt-in: + einzeln geprüfte Schreibwerkzeuge — Phase 3A). EXTERNAL fragt in jeder Stufe, auch `jarvis`. |

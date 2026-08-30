@@ -18,6 +18,7 @@ PREPARE_VOICE=1
 PREPARE_MODEL=1
 PREPARE_OPENCODE=1
 WITH_GPU_TTS=0
+WITH_GPU_STT=0
 INSTALL_TMP=""
 
 say() { printf '%s\n' "$*"; }
@@ -36,6 +37,7 @@ Aufruf: $0 [Optionen]
   --skip-ollama-model      Ollama nicht starten und kein Chatmodell laden
   --skip-opencode-cli      OpenCode-Terminal-CLI nicht ergänzen/prüfen
   --with-gpu-tts           optionales NVIDIA/CUDA-Qwen3-TTS einrichten
+  --with-gpu-stt           optionalen faster-whisper-Spracherkennungsdienst einrichten
   --allow-unsupported      Fedora-/Versionsprüfung nur als Warnung behandeln
   --dry-run                geplante Systembefehle zeigen, nichts installieren
   --verify-only            eingebettetes RPM nur prüfen und wieder entfernen
@@ -309,6 +311,16 @@ prepare_gpu_tts() {
   run_command kiki-setup-tts
 }
 
+prepare_gpu_stt() {
+  (( WITH_GPU_STT )) || return 0
+  need_command nvidia-smi
+  nvidia-smi >/dev/null 2>&1 || die "NVIDIA-Treiber/CUDA ist nicht einsatzbereit. GPU-STT wird nicht installiert."
+  if ! confirm "Optionalen faster-whisper-Spracherkennungsdienst installieren?"; then
+    return 0
+  fi
+  run_command kiki-setup-stt
+}
+
 postflight() {
   (( DRY_RUN )) && return 0
   local element
@@ -348,6 +360,7 @@ main() {
       --skip-ollama-model) PREPARE_MODEL=0 ;;
       --skip-opencode-cli) PREPARE_OPENCODE=0 ;;
       --with-gpu-tts) WITH_GPU_TTS=1 ;;
+      --with-gpu-stt) WITH_GPU_STT=1 ;;
       --allow-unsupported) ALLOW_UNSUPPORTED=1 ;;
       --dry-run) DRY_RUN=1 ;;
       --verify-only) VERIFY_ONLY=1 ;;
@@ -389,6 +402,7 @@ main() {
   fi
   prepare_models
   prepare_gpu_tts
+  prepare_gpu_stt
   postflight
   say
   say "KIKI ${KIKI_VERSION} ist bereit. Start: kiki"

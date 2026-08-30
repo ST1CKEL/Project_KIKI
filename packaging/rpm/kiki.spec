@@ -114,9 +114,17 @@ install -Dm0755 scripts/setup-llm.sh \
 for part in services/kiki-llm/*.py; do
   install -Dm0755 "${part}" %{buildroot}%{_libexecdir}/kiki/"$(basename "${part}")"
 done
+install -Dm0755 scripts/setup-stt.sh \
+  %{buildroot}%{_libexecdir}/kiki/setup-stt
+# Same glob rationale: kiki_stt_server.py is self-contained today, but a
+# forgotten sibling would ship a service that cannot start.
+for part in services/kiki-stt/*.py; do
+  install -Dm0755 "${part}" %{buildroot}%{_libexecdir}/kiki/"$(basename "${part}")"
+done
 ln -s ../libexec/kiki/setup-local-model %{buildroot}%{_bindir}/kiki-setup-model
 ln -s ../libexec/kiki/setup-tts %{buildroot}%{_bindir}/kiki-setup-tts
 ln -s ../libexec/kiki/setup-llm %{buildroot}%{_bindir}/kiki-setup-llm
+ln -s ../libexec/kiki/setup-stt %{buildroot}%{_bindir}/kiki-setup-stt
 
 %check
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src %{__python3} -m pytest -q
@@ -124,7 +132,7 @@ desktop-file-validate data/io.github.projectkiki.Kiki.desktop
 appstreamcli validate --no-net --override=url-homepage-missing=info \
   data/io.github.projectkiki.Kiki.metainfo.xml
 bash -n scripts/setup-local-model.sh scripts/setup-tts.sh scripts/setup-llm.sh \
-  scripts/normalize-character-frame.sh
+  scripts/setup-stt.sh scripts/normalize-character-frame.sh
 
 %post
 %systemd_user_post kiki.service
@@ -142,6 +150,7 @@ bash -n scripts/setup-local-model.sh scripts/setup-tts.sh scripts/setup-llm.sh \
 %{_bindir}/kiki-setup-model
 %{_bindir}/kiki-setup-tts
 %{_bindir}/kiki-setup-llm
+%{_bindir}/kiki-setup-stt
 %{_libexecdir}/kiki/
 %{kiki_python_sitelib}/kiki/
 %{_datadir}/kiki/

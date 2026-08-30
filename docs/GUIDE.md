@@ -212,7 +212,8 @@ KIKI kann Bilder und Bildschirmfotos analysieren, um dir bei visuellen Aufgaben,
 - **Weckwort „KIKI“:** In den Einstellungen kann die permanente Weckworterkennung aktiviert werden (standardmäßig deaktiviert zur Ressourcenschonung).
 - **Direkte Rückfragen:** Nach KIKIs Antwort kannst du innerhalb des kurzen Hörfensters direkt weitersprechen. Ohne Spracheingabe endet das Fenster automatisch; deaktivierbar unter **Privatsphäre → Sprache**.
 - **Sprachmodell wählen:** Über `[voice] stt_model` in der Konfiguration (`~/.config/kiki/config.toml`) steht zwischen zwei lokalen Modellen zur Wahl. Das kleine Standardmodell (`vosk-model-small-de-0.15`, ~45 MB) ist sparsam, verhört sich aber auf echten Stimmen häufig beim Namen „Kiki“ — das Weckwort reagiert dann nicht. Das große Modell (`vosk-model-de-0.21`) erkennt Sprache und Weckwort deutlich zuverlässiger, kostet aber einen ~1,9-GB-Download und beim Laden mehrere GB RAM.
-- **Offline-Sicherheit:** Die Spracherkennung läuft zu 100 % lokal über das deutsche Vosk-Modell. Keine Sprachdaten verlassen deinen Rechner.
+- **Besseres Sprachverständnis (optional):** Mit `kiki-setup-stt` wird ein zusätzlicher lokaler faster-whisper-Dienst eingerichtet (Port 18775). Vosk hört weiter das Weckwort und das Äußerungsende; die erkannte Audio-Passage wird aber von Whisper abgeschrieben — deutlich präziser bei Eigennamen wie „Thunderbird". Ist der Dienst aus, nutzt KIKI automatisch den Vosk-Text.
+- **Offline-Sicherheit:** Die gesamte Spracherkennung läuft zu 100 % lokal (Vosk in der App, optional faster-whisper als Loopback-Dienst). Keine Sprachdaten verlassen deinen Rechner.
 
 ### Sprachausgabe (TTS)
 - **Qwen3-TTS GPU-Dienst:** Erzeugt flüssige, warm klingende deutsche Sprache mit Satz-Streaming.
