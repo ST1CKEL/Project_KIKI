@@ -38,6 +38,11 @@ _FUZZY_MIN_MARGIN = 0.12
 _FUZZY_MIN_LENGTH = 4
 
 
+class LaunchAction(StrEnum):
+    OPEN = "open"
+    CLOSE = "close"
+
+
 class LaunchRoute(StrEnum):
     AUTO = "auto"
     STEAM = "steam"
@@ -47,6 +52,7 @@ class LaunchRoute(StrEnum):
 class DirectLaunchRequest:
     target: str
     route: LaunchRoute = LaunchRoute.AUTO
+    action: LaunchAction = LaunchAction.OPEN
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,29 @@ class DirectActionResult:
     answer: str
     ok: bool
     tool: str = ""
+
+
+_OPEN_VERBS = "starte|start|öffne|oeffne|open|launch"
+_CLOSE_VERBS = "beende|beenden|schließt?|schließe|schliessen|schließen|quit|close"
+_PREFIX = re.compile(
+    rf"^(?:(?:hey\s+)?kiki\s*[,,:]?\s*)?(?:bitte\s+)?"
+    rf"(?P<verb>{_OPEN_VERBS}|{_CLOSE_VERBS})\s+"
+    rf"(?:bitte\s+)?(?P<target>.+?)\s*[.!]?$",
+    re.IGNORECASE,
+)
+_CLOSE = frozenset(
+    {
+        "beende",
+        "beenden",
+        "schließ",
+        "schliesst",
+        "schließe",
+        "schliessen",
+        "schließen",
+        "quit",
+        "close",
+    }
+)
 
 
 def parse_direct_launch(text: str) -> DirectLaunchRequest | None:
@@ -64,7 +93,9 @@ def parse_direct_launch(text: str) -> DirectLaunchRequest | None:
     match = _PREFIX.fullmatch(raw)
     if match is None:
         return None
-    target = match.group(1).strip()
+    # lower(), not casefold(): ß folds to "ss" and would miss the verb.
+    action = LaunchAction.CLOSE if match.group("verb").lower() in _CLOSE else LaunchAction.OPEN
+    target = match.group("target").strip()
     steam = _STEAM_SUFFIX.search(target)
     route = LaunchRoute.STEAM if steam is not None else LaunchRoute.AUTO
     if steam is not None:
@@ -84,7 +115,7 @@ def parse_direct_launch(text: str) -> DirectLaunchRequest | None:
         or target.startswith("-")
     ):
         return None
-    return DirectLaunchRequest(target=target, route=route)
+    return DirectLaunchRequest(target=target, route=route, action=action)
 
 
 def _best_fuzzy(candidates: list[tuple[str, str]], target: str) -> str | None:
@@ -134,6 +165,8 @@ class DirectActionService:
         return parse_direct_launch(text)
 
     async def execute(self, request: DirectLaunchRequest) -> DirectActionResult:
+        if request.action is LaunchAction.CLOSE:
+            return await self._close(request)
         app = None if request.route is LaunchRoute.STEAM else self._applications.find(request.target)
         if app is None and request.route is LaunchRoute.AUTO:
             fuzzy_id = _best_fuzzy(
@@ -166,6 +199,37 @@ class DirectActionService:
         return DirectActionResult(
             answer=f"Ich habe keine eindeutige lokale {category} namens „{request.target}“ gefunden.",
             ok=False,
+        )
+
+    async def _close(self, request: DirectLaunchRequest) -> DirectActionResult:
+        """Close a desktop app. Steam games are deliberately out of scope: a
+        game that loses its process can lose a save — that choice stays with
+        the person inside the game."""
+        if request.route is LaunchRoute.STEAM:
+            return DirectActionResult(
+                answer=(
+                    "Steam-Spiele schließe ich nicht selbst — bitte über das "
+                    "Spielmenü beenden, damit ein Spielstand sicher ist."
+                ),
+                ok=False,
+            )
+        app = self._applications.find(request.target)
+        if app is None:
+            fuzzy_id = _best_fuzzy(
+                [(entry.app_id, entry.name) for entry in self._applications.entries()],
+                request.target,
+            )
+            if fuzzy_id is not None:
+                app = self._applications.find(fuzzy_id)
+        if app is None:
+            return DirectActionResult(
+                answer=f"Ich habe keine Anwendung namens „{request.target}“ gefunden.",
+                ok=False,
+            )
+        return await self._invoke(
+            "app.close",
+            {"app_id": app.app_id},
+            success=f"Ich schließe {app.name}.",
         )
 
     async def _invoke(

@@ -80,6 +80,7 @@ from kiki.ui.preferences_window import PreferencesWindow
 from kiki.ui.run_bar_model import text_for as run_status_text
 from kiki.ui.workspace_manager_window import WorkspaceManagerWindow
 from kiki.voice.answer import VoiceAnswerDelivery, plan_voice_answer
+from kiki.voice.cue import play_cue
 from kiki.voice.director import SpeechDirector
 from kiki.voice.follow_up import FollowUpTurn
 from kiki.voice.recorder import AudioRecorder, RecorderError
@@ -1231,6 +1232,8 @@ class KikiApplication(Adw.Application):
         self._machine.set(CharacterState.LISTENING, hold_ms=0)
         if self._chat is not None:
             self._chat.set_listening(True)
+        if self._settings.voice.wake.listen_cue:
+            play_cue("listen-start")
         self._toast("KIKI hört. Sag deine Frage.")
         return False
 
@@ -1279,6 +1282,8 @@ class KikiApplication(Adw.Application):
             self._chat.set_listening(False)
         if self._machine.state is CharacterState.LISTENING:
             self._machine.set(CharacterState.IDLE, hold_ms=0)
+        if self._settings.voice.wake.listen_cue:
+            play_cue("listen-stop")
         self._toast("Zuhören beendet. Sag „KIKI“ für eine neue Frage.")
         return False
 

@@ -129,7 +129,7 @@ KIKI steuert den GNOME- oder KDE-Desktop direkt über den Chat oder per Sprache:
 | **Medien** (MPRIS) | `media.status`, `media.play_pause`, `media.next`, `media.previous`, `media.stop` | „Was läuft gerade für Musik?“ · „Nächster Titel“ |
 | **Lautstärke** | `audio.volume_get`, `audio.volume_set`, `audio.mute` | „Stell die Lautstärke auf 30 Prozent“ · „Stumm“ |
 | **Helligkeit** | `display.brightness_get`, `display.brightness_set` | „Dimm das Display auf 60 Prozent“ |
-| **Anwendungen** | `app.list`, `app.open` | „Öffne Firefox“ · „Starte den Rechner (Calculator)“ |
+| **Anwendungen** | `app.list`, `app.open`, `app.close` | „Öffne Firefox“ · „Starte den Rechner (Calculator)“ · „Beende Thunderbird“ · „Schließe Firefox“ |
 | **Steam-Spiele** | `steam.list_installed`, `steam.launch` | „Starte Hades“ · „Öffne Portal 2 über Steam“ |
 | **Sitzung** | `session.lock` | „Sperr den Bildschirm“ |
 | **Netzwerk** | `network.wifi_list`, `network.wifi_set`, `network.vpn_list`, `network.vpn_connect`, `network.vpn_disconnect` | „Welche WLANs gibt es?“ · „Schalt das WLAN aus“ · „Verbinde das VPN“ |
@@ -209,9 +209,10 @@ KIKI kann Bilder und Bildschirmfotos analysieren, um dir bei visuellen Aufgaben,
 
 ### Spracheingabe (STT)
 - **Push-to-Talk:** Halte das Mikrofon-Symbol im Chat oder die konfigurierte Taste gedrückt, sprich deine Frage und lasse die Taste los.
-- **Weckwort „KIKI“:** In den Einstellungen kann die permanente Weckworterkennung aktiviert werden (standardmäßig deaktiviert zur Ressourcenschonung).
+- **Weckwort „KIKI“:** In den Einstellungen kann die permanente Weckworterkennung aktiviert werden (standardmäßig deaktiviert zur Ressourcenschonung). KIKI erkennt ihr Weckwort bereits während des Sprechens (kein Warten auf das Äußerungsende), bestätigt das Zuhören mit zwei kurzen Tönen (`[voice.wake] listen_cue`) und versteht Befehle im selben Atemzug: „Hey KIKI, öffne Thunderbird“.
 - **Direkte Rückfragen:** Nach KIKIs Antwort kannst du innerhalb des kurzen Hörfensters direkt weitersprechen. Ohne Spracheingabe endet das Fenster automatisch; deaktivierbar unter **Privatsphäre → Sprache**.
 - **Sprachmodell wählen:** Über `[voice] stt_model` in der Konfiguration (`~/.config/kiki/config.toml`) steht zwischen zwei lokalen Modellen zur Wahl. Das kleine Standardmodell (`vosk-model-small-de-0.15`, ~45 MB) ist sparsam, verhört sich aber auf echten Stimmen häufig beim Namen „Kiki“ — das Weckwort reagiert dann nicht. Das große Modell (`vosk-model-de-0.21`) erkennt Sprache und Weckwort deutlich zuverlässiger, kostet aber einen ~1,9-GB-Download und beim Laden mehrere GB RAM.
+- **Apps beenden per Stimme:** „Beende Thunderbird“ schließt die Anwendung sanft (Beenden-Signal, kein erzwungenes Kill) — eine App mit ungespeicherten Daten kann selbst noch nachfragen. Steam-Spiele schließt KIKI bewusst nicht selbst.
 - **Besseres Sprachverständnis (optional):** Mit `kiki-setup-stt` wird ein zusätzlicher lokaler faster-whisper-Dienst eingerichtet (Port 18775). Vosk hört weiter das Weckwort und das Äußerungsende; die erkannte Audio-Passage wird aber von Whisper abgeschrieben — deutlich präziser bei Eigennamen wie „Thunderbird". Ist der Dienst aus, nutzt KIKI automatisch den Vosk-Text.
 - **Offline-Sicherheit:** Die gesamte Spracherkennung läuft zu 100 % lokal (Vosk in der App, optional faster-whisper als Loopback-Dienst). Keine Sprachdaten verlassen deinen Rechner.
 

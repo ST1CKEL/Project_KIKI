@@ -148,6 +148,9 @@ command_timeout_s = 12
 # After KIKI answers a wake-word command, accept one direct follow-up during
 # the same timeout window. Silence returns to normal wake-word matching.
 follow_up = true
+# Two quiet notes: rising when KIKI starts listening, falling when the window
+# closes without a command. Spoken input needs an audible acknowledgement.
+listen_cue = true
 
 [voice.response_policy]
 # For a microphone-started turn KIKI speaks at most two sentences / 300

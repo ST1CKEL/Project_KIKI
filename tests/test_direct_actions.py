@@ -14,6 +14,7 @@ from kiki.runtime.event_bus import EventBus
 from kiki.tools.app_launch_tools import AppLaunchSkill, DesktopIndex
 from kiki.tools.direct_actions import (
     DirectActionService,
+    LaunchAction,
     LaunchRoute,
     _best_fuzzy,
     parse_direct_launch,
@@ -172,3 +173,55 @@ def test_direct_chat_bypasses_the_provider_and_keeps_history(
     history = chats.history(conversation.id)
     assert [message.role for message in history] == ["user", "assistant"]
     assert "app.open" in history[-1].content
+
+
+# --- closing apps -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["beende thunderbird", "schließe den Firefox", "KIKI, beende bitte Thunderbird."],
+)
+def test_close_commands_parse_with_close_action(phrase) -> None:
+    request = parse_direct_launch(phrase)
+    assert request is not None
+    assert request.action is LaunchAction.CLOSE
+    assert request.target in {"thunderbird", "Firefox", "Thunderbird"}
+
+
+def test_open_commands_keep_the_open_action() -> None:
+    request = parse_direct_launch("starte thunderbird")
+    assert request.action is LaunchAction.OPEN
+
+
+def test_close_dispatch_sends_only_a_polite_signal(
+    direct_environment, monkeypatch
+) -> None:
+    import signal as signal_module
+
+    import kiki.tools.app_launch_tools as app_tools
+
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(app_tools.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(app_tools, "matching_pids", lambda binary, **_: [12345])
+    monkeypatch.setattr(app_tools.time, "sleep", lambda _s: None)
+    service, _apps, _games = direct_environment
+    result = asyncio.run(service.execute(parse_direct_launch("beende firefox")))
+    assert result.ok is True
+    assert result.tool == "app.close"
+    assert signals == [(12345, signal_module.SIGTERM)]
+
+
+def test_close_of_unknown_app_launches_nothing(direct_environment) -> None:
+    service, _apps, _games = direct_environment
+    result = asyncio.run(service.execute(parse_direct_launch("beende nichtvorhanden")))
+    assert result.ok is False
+    assert result.tool == ""
+
+
+def test_closing_steam_games_is_refused(direct_environment) -> None:
+    service, _apps, games = direct_environment
+    result = asyncio.run(service.execute(parse_direct_launch("beende hades über steam")))
+    assert result.ok is False
+    assert result.tool == ""
+    assert games == []

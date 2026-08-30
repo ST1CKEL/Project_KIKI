@@ -135,3 +135,59 @@ def test_index_refreshes_when_directory_changes(apps, tmp_path) -> None:
 
     os.utime(apps[1], None)  # bump the directory mtime the cache compares against
     assert index.find("new-app") is not None
+
+
+# --- app.close: exec derivation and process matching ---------------------------
+
+
+def _write_exec_desktop(path: Path, exec_line: str) -> Path:
+    path.write_text(
+        f"[Desktop Entry]\nType=Application\nName=X\nExec={exec_line}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_desktop_exec_binary_takes_the_first_program(tmp_path: Path) -> None:
+    assert (
+        app_launch_tools.desktop_exec_binary(_write_exec_desktop(tmp_path / "a.desktop", "/usr/bin/tool --flag %u"))
+        == "tool"
+    )
+
+
+def test_desktop_exec_binary_refuses_shell_wrappers(tmp_path: Path) -> None:
+    assert (
+        app_launch_tools.desktop_exec_binary(_write_exec_desktop(tmp_path / "s.desktop", 'sh -c "rm -rf ~"'))
+        is None
+    )
+
+
+def test_matching_pids_only_matches_the_named_program(tmp_path: Path) -> None:
+    for pid, argv in (
+        ("11", b"/usr/bin/tool\x00--flag\x00"),
+        ("12", b"/usr/bin/python3\x00tool.py\x00"),
+        ("13", b"/usr/bin/other\x00"),
+        ("14", b""),
+    ):
+        d = tmp_path / pid
+        d.mkdir()
+        (d / "cmdline").write_bytes(argv)
+    assert app_launch_tools.matching_pids("tool", proc_dir=tmp_path, exclude_pid=99) == [11]
+    # Interpreter scripts are matched by their script name.
+    assert app_launch_tools.matching_pids("tool.py", proc_dir=tmp_path, exclude_pid=99) == [12]
+
+
+def test_close_is_control_risk_and_signals_only_sigterm(
+    apps, monkeypatch
+) -> None:
+    spec = next(s for s in app_launch_tools.AppLaunchSkill().tools() if s.name == "app.close")
+    assert spec.risk is RiskLevel.CONTROL
+    decision = ToolPolicy().evaluate(
+        name=spec.name,
+        params={"app_id": "firefox"},
+        spec=spec,
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.USER,
+    )
+    assert decision.kind is DecisionKind.ALLOW

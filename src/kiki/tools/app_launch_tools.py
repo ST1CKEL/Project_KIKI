@@ -11,7 +11,10 @@ from __future__ import annotations
 import configparser
 import logging
 import os
+import re
+import shlex
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -149,6 +152,74 @@ def _parse_entry(file_path: Path) -> DesktopEntry | None:
     return DesktopEntry(app_id=file_path.stem, name=name, path=file_path)
 
 
+_INTERPRETERS = {"python", "python3", "sh", "bash", "node", "ruby", "perl"}
+_EXEC_SKIP = {"env", "nohup", "stdbuf"}
+_EXEC_FIELD_CODES = re.compile(r"%[fFuUdDnNickvm]")
+
+
+def desktop_exec_binary(desktop_path: Path) -> str | None:
+    """The program a .desktop entry runs: Exec's first real token, basenamed.
+
+    Deliberately conservative: entries that run through a shell wrapper or a
+    command string yield None, and app.close refuses to guess from there.
+    """
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        parser.read(desktop_path, encoding="utf-8")
+    except (configparser.Error, OSError):
+        return None
+    if not parser.has_section("Desktop Entry"):
+        return None
+    exec_line = parser["Desktop Entry"].get("Exec", "").strip()
+    if not exec_line:
+        return None
+    cleaned = _EXEC_FIELD_CODES.sub("", exec_line)
+    try:
+        tokens = shlex.split(cleaned)
+    except ValueError:
+        return None
+    for token in tokens:
+        base = os.path.basename(token)
+        if base in _EXEC_SKIP:
+            continue
+        if "=" in base and not token.startswith(("-", "/")):
+            continue  # env-style assignment
+        if token.startswith("-"):
+            break
+        if base in _EXEC_SKIP or base in _INTERPRETERS:
+            # Interpreter without a visible script name: nothing to signal.
+            break
+        return base
+    return None
+
+
+def matching_pids(
+    binary: str, *, proc_dir: Path = Path("/proc"), exclude_pid: int | None = None
+) -> list[int]:
+    """Running processes whose program is this one; KIKI is never included."""
+    if exclude_pid is None:
+        exclude_pid = os.getpid()
+    found: list[int] = []
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == exclude_pid:
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\x00")
+        except OSError:
+            continue
+        if not argv or not argv[0]:
+            continue
+        name = os.path.basename(argv[0].decode("utf-8", "replace"))
+        if name in _INTERPRETERS and len(argv) > 1 and argv[1]:
+            name = os.path.basename(argv[1].decode("utf-8", "replace"))
+        if name == binary:
+            found.append(pid)
+    return found
+
+
 def _launch(argv: list[str]) -> None:
     env = desktop_env(home=os.environ.get("HOME") or "/tmp")
     subprocess.Popen(
@@ -170,7 +241,7 @@ class AppLaunchSkill:
         self._index = index or DesktopIndex()
 
     def tools(self) -> list[ToolSpec]:
-        return [self._list_spec(), self._open_spec()]
+        return [self._list_spec(), self._open_spec(), self._close_spec()]
 
     def _list_spec(self) -> ToolSpec:
         return ToolSpec(
@@ -219,6 +290,34 @@ class AppLaunchSkill:
             model_callable=True,
         )
 
+    def _close_spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="app.close",
+            title="Anwendung beenden",
+            description=(
+                "Beendet eine laufende Anwendung über ihre app_id aus app.list "
+                "(z. B. `firefox` oder `org.thunderbird.Thunderbird`)."
+            ),
+            risk=RiskLevel.CONTROL,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "app_id": {"type": "string", "minLength": 1, "maxLength": 128}
+                },
+                "required": ["app_id"],
+                "additionalProperties": False,
+            },
+            handler=self._close,
+            effect=(
+                "Sendet ein Beenden-Signal (SIGTERM) an die Prozesse der "
+                "Anwendung. Kein erzwungenes Kill: Das Programm kann sich "
+                "selbst schützen (z. B. nachfragen, ob gespeichert werden soll)."
+            ),
+            target="Laufende Anwendung",
+            auto_allow=True,
+            model_callable=True,
+        )
+
     def _list(self, params: dict[str, Any]) -> dict[str, Any]:
         query = params.get("query")
         entries = self._index.list(str(query) if query else None)
@@ -249,3 +348,39 @@ class AppLaunchSkill:
         except OSError as exc:
             return {"ok": False, "error": f"Anwendung konnte nicht gestartet werden: {exc}"}
         return {"ok": True, "app": entry.app_id, "name": entry.name}
+
+    def _close(self, params: dict[str, Any]) -> dict[str, Any]:
+        entry = self._index.find(str(params["app_id"]))
+        if entry is None:
+            return {
+                "ok": False,
+                "error": (
+                    f"Anwendung „{params['app_id']}“ nicht eindeutig gefunden. "
+                    "app.list zeigt die verfügbaren app_ids."
+                ),
+            }
+        binary = desktop_exec_binary(entry.path)
+        if binary is None:
+            return {
+                "ok": False,
+                "error": f"Aus dem Desktop-Eintrag von {entry.name} lässt sich kein "
+                "Programm ableiten — Beenden nicht möglich.",
+            }
+        pids = matching_pids(binary)
+        if not pids:
+            return {"ok": False, "error": f"{entry.name} läuft gerade nicht."}
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
+        time.sleep(1.0)
+        running = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
+        result: dict[str, Any] = {"ok": True, "app": entry.app_id, "name": entry.name}
+        if running:
+            # Still alive after the polite signal: apps with unsaved work show
+            # their own "save?" dialog. Never escalate to SIGKILL.
+            result["note"] = (
+                f"{entry.name} schließt sich noch (oder wartet auf eine Antwort)."
+            )
+        return result

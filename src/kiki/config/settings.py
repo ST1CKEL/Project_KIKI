@@ -221,6 +221,9 @@ class WakeSettings:
     # more utterance without another wake word. The wake feature itself remains
     # off by default, so this never opens a microphone on its own.
     follow_up: bool = True
+    # Two quiet notes announce "I hear you" and "window closed" — spoken input
+    # needs an answer the ear can catch without looking at the screen.
+    listen_cue: bool = True
 
 
 @dataclass
@@ -427,6 +430,7 @@ class Settings:
                     "cooldown_ms": self.voice.wake.cooldown_ms,
                     "command_timeout_s": self.voice.wake.command_timeout_s,
                     "follow_up": self.voice.wake.follow_up,
+                    "listen_cue": self.voice.wake.listen_cue,
                 },
                 "response_policy": {
                     "speak_code": self.voice.response_policy.speak_code,
@@ -727,6 +731,7 @@ def _parse_wake(data: dict[str, Any]) -> WakeSettings:
         cooldown_ms=_bounded_int(data.get("cooldown_ms"), default=2000, low=0, high=30000),
         command_timeout_s=_bounded_int(data.get("command_timeout_s"), default=12, low=2, high=120),
         follow_up=data.get("follow_up", True) is True,
+        listen_cue=data.get("listen_cue", True) is True,
     )
 
 

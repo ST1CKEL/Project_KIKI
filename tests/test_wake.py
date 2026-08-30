@@ -214,13 +214,21 @@ def test_paused_listener_refuses_a_follow_up_window() -> None:
     assert listener.state is ListenerState.WAITING
 
 
-def test_empty_command_is_still_delivered() -> None:
-    """The app decides how to report "nothing understood"; the listener does not."""
+def test_empty_finalize_keeps_the_window_open() -> None:
+    """A blank utterance right after the wake word is a pause, not a command.
+
+    The listener keeps capturing; the timeout closes the window if nobody
+    speaks. The app's "nothing understood" path is only for real commands.
+    """
     listener, _detected, commands = _listener()
     listener.handle("kiki", now=0.0)
+    assert listener.state is ListenerState.CAPTURING
     listener.handle("", now=1.0)
-    assert commands == [("", b"")]
-    assert listener.state is ListenerState.WAITING
+    assert commands == []
+    assert listener.state is ListenerState.CAPTURING
+
+    listener.handle("wie ist das wetter", now=2.0)
+    assert commands == [("wie ist das wetter", b"")]
 
 
 def test_resume_clears_capture_state_and_resets_the_stream() -> None:
@@ -319,5 +327,50 @@ def test_paused_audio_never_leaks_into_the_next_command() -> None:
     listener.resume()
     assert listener.capture_next() is True
 
-    listener.handle("", now=1.0)
-    assert received == [("", b"")]
+    listener.handle("wie geht es dir", now=1.0)
+    assert received == [("wie geht es dir", b"")]
+
+
+# --- partial-result spotting --------------------------------------------------
+
+
+def test_partial_text_spots_the_wake_word_immediately() -> None:
+    listener, detected, commands = _listener()
+    listener.handle(None, partial="hey", now=0.0)
+    assert detected == []
+    listener.handle(None, partial="hey kiki", now=0.3)
+    assert detected == ["wake"]
+    assert listener.state is ListenerState.CAPTURING
+    assert commands == []
+
+
+def test_partial_wake_and_one_breath_command_in_the_same_utterance() -> None:
+    listener, detected, commands = _listener()
+    listener.handle(None, partial="hey kiki öffne", now=0.0)
+    assert detected == ["wake"]
+    assert listener.state is ListenerState.CAPTURING
+
+    # The utterance finalizes with wake word and command together.
+    listener.handle("hey kiki öffne thunderbird", now=2.0)
+    assert commands == [("öffne thunderbird", b"")]
+    assert listener.state is ListenerState.WAITING
+
+
+def test_one_breath_command_without_partial_still_delivers() -> None:
+    listener, detected, commands = _listener()
+    listener.handle("kiki beende thunderbird", now=0.0)
+    assert detected == ["wake"]
+    assert commands == [("beende thunderbird", b"")]
+    assert listener.state is ListenerState.WAITING
+
+
+def test_partial_is_ignored_while_capturing_and_after_timeout() -> None:
+    listener, detected, _commands = _listener()
+    listener.handle("kiki", now=0.0)
+    # Still capturing: partial text must not re-trigger the wake cue.
+    listener.handle(None, partial="kiki nochmal", now=0.5)
+    assert detected == ["wake"]
+    # Silence ends the window; afterwards the wake word works again.
+    listener.handle(None, now=13.0)
+    listener.handle(None, partial="kiki nochmal", now=14.0)
+    assert detected == ["wake", "wake"]

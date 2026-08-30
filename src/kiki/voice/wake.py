@@ -172,15 +172,26 @@ class UtteranceStream:
             log.warning("recognizer failed: %s", exc)
             return None
 
+    def partial(self) -> str:
+        """The not-yet-final text, for spotting the wake word immediately."""
+        recognizer = self._recognizer
+        if recognizer is None:
+            return ""
+        try:
+            return _heard_text(recognizer.PartialResult(), key="partial")
+        except Exception as exc:
+            log.debug("partial result failed: %s", exc)
+            return ""
 
-def _heard_text(raw: str) -> str:
+
+def _heard_text(raw: str, *, key: str = "text") -> str:
     try:
         payload = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return ""
     if not isinstance(payload, dict):
         return ""
-    return str(payload.get("text") or "")
+    return str(payload.get(key) or "")
 
 
 def _default_factories():
@@ -424,8 +435,20 @@ class WakeWordListener:
         self._capture_pcm = []
         self._state = ListenerState.WAITING
 
-    def handle(self, text: str | None, *, now: float | None = None) -> None:
-        """State machine for one finished utterance. Separated out for testing."""
+    def handle(
+        self,
+        text: str | None,
+        *,
+        partial: str = "",
+        now: float | None = None,
+    ) -> None:
+        """State machine for one recognizer event. Separated out for testing.
+
+        Two wake paths, both ending in CAPTURING: the partial text spots the
+        wake word the moment it is spoken (no waiting for Vosk to close the
+        utterance), and a finalized utterance that simply *is* the wake word
+        keeps the classic pause between wake word and command.
+        """
         moment = time.monotonic() if now is None else now
         if self._state is ListenerState.CAPTURING and moment > self._capture_deadline:
             self._state = ListenerState.WAITING
@@ -433,13 +456,27 @@ class WakeWordListener:
             if self._on_timeout is not None:
                 self._on_timeout()
         if text is None:
+            if self._state is ListenerState.WAITING and partial:
+                if moment >= self._cooldown_until and phrase_matches(partial, self._phrases):
+                    log.info("wake word detected")
+                    self._state = ListenerState.CAPTURING
+                    self._capture_deadline = moment + self._command_timeout
+                    self._on_detect()
             return
         if self._state is ListenerState.CAPTURING:
+            # The finalized utterance usually contains the wake word plus the
+            # command ("hey kiki öffne thunderbird"). Strip the wake word;
+            # whatever remains is the command. Nothing remaining means the
+            # person paused after the wake word — the *next* utterance speaks.
+            command = self._strip_wake_prefix(text)
+            if not command:
+                self._capture_deadline = moment + self._command_timeout
+                return
             self._state = ListenerState.WAITING
             self._cooldown_until = moment + self._cooldown
             pcm = b"".join(self._capture_pcm)
             self._capture_pcm = []
-            self._on_command(text.strip(), pcm)
+            self._on_command(command, pcm)
             return
         if moment < self._cooldown_until:
             return
@@ -447,9 +484,27 @@ class WakeWordListener:
             # Discarded here. Non-wake speech never leaves the listener.
             return
         log.info("wake word detected")
+        command = self._strip_wake_prefix(text)
         self._state = ListenerState.CAPTURING
         self._capture_deadline = moment + self._command_timeout
         self._on_detect()
+        if command:
+            # One breath: wake word and command in the same utterance. The
+            # partial path missed it (or was too late), so deliver right away.
+            self._state = ListenerState.WAITING
+            self._cooldown_until = moment + self._cooldown
+            self._on_command(command, b"")
+
+    def _strip_wake_prefix(self, text: str) -> str:
+        """Remove the wake phrase (and an optional greeting) from the front."""
+        tokens = normalize(text).split()
+        for phrase in self._phrases:
+            wanted = normalize(phrase).split()
+            for leading in (0, 1):
+                window = tokens[leading : leading + len(wanted)]
+                if len(tokens) >= leading + len(wanted) and window == wanted:
+                    return " ".join(tokens[leading + len(wanted) :]).strip()
+        return normalize(text).strip()
 
     def _run(self) -> None:
         try:
@@ -468,7 +523,8 @@ class WakeWordListener:
                     if self._state is ListenerState.CAPTURING:
                         self._capture_pcm.append(chunk)
                     heard = self._stream.feed(chunk)
-                self.handle(heard)
+                    partial = "" if heard is not None else self._stream.partial()
+                self.handle(heard, partial=partial)
         except Exception as exc:  # pragma: no cover - hardware failure path
             log.exception("wake listener crashed")
             if self._on_error is not None:
