@@ -130,23 +130,32 @@ KIKI steuert den GNOME- oder KDE-Desktop direkt über den Chat oder per Sprache:
 | **Lautstärke** | `audio.volume_get`, `audio.volume_set`, `audio.mute` | „Stell die Lautstärke auf 30 Prozent“ · „Stumm“ |
 | **Helligkeit** | `display.brightness_get`, `display.brightness_set` | „Dimm das Display auf 60 Prozent“ |
 | **Anwendungen** | `app.list`, `app.open` | „Öffne Firefox“ · „Starte den Rechner (Calculator)“ |
+| **Steam-Spiele** | `steam.list_installed`, `steam.launch` | „Starte Hades“ · „Öffne Portal 2 über Steam“ |
 | **Sitzung** | `session.lock` | „Sperr den Bildschirm“ |
 | **Netzwerk** | `network.wifi_list`, `network.wifi_set`, `network.vpn_list`, `network.vpn_connect`, `network.vpn_disconnect` | „Welche WLANs gibt es?“ · „Schalt das WLAN aus“ · „Verbinde das VPN“ |
 | **Energie** | `power.suspend`, `power.reboot`, `power.poweroff` | „Schlafmodus“ · „Fahr den Rechner runter“ |
 
 Lesen (READ) und Steuern (CONTROL) führt KIKI in der Standardstufe `balanced`
 ohne Nachfrage aus — auch WLAN/VPN-Schaltung und Ruhezustand. Neustart und
-Ausschalten (WRITE) fragen außerhalb des Jarvis-Modus nach. Anwendungen starten (`LAUNCH`) klappt die Stufe `trusted`
-auf. Schreibendes und Externes zeigen — wie bisher — eine Freigabekarte.
+Ausschalten (WRITE) fragen außerhalb des Jarvis-Modus nach. Modellseitige lokale
+Starts (`LAUNCH`) klappt die Stufe `trusted` auf. Eine eindeutige Direktanweisung
+wie „Starte Firefox“ oder „Öffne Hades über Steam“ ist bereits die Freigabe:
+KIKI löst den Namen deterministisch gegen den lokalen App- beziehungsweise
+Steam-Index auf, bevor irgendein Modell beteiligt wäre. Zusammengesetzte oder
+unklare Sätze bleiben im normalen Chatpfad. Externe Aktionen zeigen in jeder
+Vertrauensstufe eine neue Freigabekarte.
 
 ### Jarvis-Modus (experimentell)
 
 In den Einstellungen unter **Selbstständigkeit → Vertrauensstufe** kann
-**„… + Alles ohne Rückfragen (jarvis)“** gewählt werden. Dann handelt KIKI
-auch Schreibendes und Externes ohne Karte. Was auch dann weiter gilt:
+**„… + ausgewählte Schreibaktionen (jarvis)“** gewählt werden. Dann darf KIKI
+die einzeln geprüften Jarvis-Schreibwerkzeuge ohne Karte ausführen. Was auch
+dann weiter gilt:
 
 - Die Hard-Deny-Liste (`sudo`, freie Shell, `rm`, …) bleibt hart blockiert.
 - Der Panic-Schalter stoppt sofort alles, auch Jarvis-Aktionen.
+- Jede externe Aktion braucht weiterhin eine aktuelle Bestätigung; externe
+  Routinen laufen deshalb nicht unbeaufsichtigt.
 - Jede Ausführung landet weiterhin im Audit-Log.
 - Werkzeuge mit bewusster Bestätigungspflicht (Routinen anlegen/löschen,
   Zwischenablage, Gedächtnis) zeigen auch im Jarvis-Modus ihre Karte.

@@ -88,7 +88,6 @@ def _spec(skill: DesktopLaunchSkill, name: str):
         "workspace.open_file",
         "terminal.open_workspace",
         "workspace.open_in_editor",
-        "browser.open_url",
     ],
 )
 def test_openers_are_launch_and_model_callable(skill, name) -> None:
@@ -96,6 +95,23 @@ def test_openers_are_launch_and_model_callable(skill, name) -> None:
     assert spec.risk is RiskLevel.LAUNCH
     assert spec.model_callable is True
     assert spec.auto_allow is True
+
+
+def test_browser_stays_external_and_confirmation_only(skill) -> None:
+    spec = _spec(skill, "browser.open_url")
+    assert spec.risk is RiskLevel.EXTERNAL
+    assert spec.model_callable is True
+    assert spec.auto_allow is True
+    for level in AutonomyLevel:
+        decision = ToolPolicy(level.value).evaluate(
+            name=spec.name,
+            params={"url": "https://example.com"},
+            spec=spec,
+            panic=False,
+            integrations_enabled=True,
+            origin=Origin.MODEL,
+        )
+        assert decision.kind is DecisionKind.CONFIRM
 
 
 def test_listing_workspaces_is_read_only(skill) -> None:
@@ -184,8 +200,8 @@ def test_trusted_still_confirms_writes_and_external(skill) -> None:
     assert decision.kind is DecisionKind.CONFIRM
 
 
-def test_trusted_does_not_change_the_user_path(skill) -> None:
-    """A user-origin LAUNCH keeps its confirmation; only the model path changed."""
+def test_an_explicit_user_launch_needs_no_second_card(skill) -> None:
+    """The trusted parser already binds the person's command to this target."""
     decision = ToolPolicy("trusted").evaluate(
         name="workspace.open_in_file_manager",
         params={"workspace_id": "ws-1"},
@@ -194,7 +210,7 @@ def test_trusted_does_not_change_the_user_path(skill) -> None:
         integrations_enabled=True,
         origin=Origin.USER,
     )
-    assert decision.kind is DecisionKind.CONFIRM
+    assert decision.kind is DecisionKind.ALLOW
 
 
 def test_panic_blocks_opening_at_every_level(skill) -> None:

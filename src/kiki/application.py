@@ -53,9 +53,10 @@ from kiki.storage.database import Database
 from kiki.storage.memory_repository import MemoryRepository
 from kiki.storage.secrets import create_secret_store
 from kiki.storage.workspace_repository import WorkspaceRepository
-from kiki.tools.app_launch_tools import AppLaunchSkill
+from kiki.tools.app_launch_tools import AppLaunchSkill, DesktopIndex
 from kiki.tools.audio_tools import AudioControlSkill
 from kiki.tools.audit import AuditLog
+from kiki.tools.direct_actions import DirectActionService
 from kiki.tools.display_tools import DisplayControlSkill
 from kiki.tools.executor import ToolExecutor
 from kiki.tools.gateway import ToolGateway
@@ -67,6 +68,7 @@ from kiki.tools.policy import RiskLevel, ToolPolicy
 from kiki.tools.power_tools import PowerControlSkill
 from kiki.tools.registry import ActionPreview, ToolRegistry
 from kiki.tools.session_tools import SessionControlSkill
+from kiki.tools.steam_launch_tools import SteamIndex, SteamLaunchSkill
 from kiki.ui.chat_window import ChatWindow
 from kiki.ui.coding_session_window import CodingSessionWindow
 from kiki.ui.confirmation_dialog import present_confirmation
@@ -196,7 +198,10 @@ class KikiApplication(Adw.Application):
         skills.register(MediaControlSkill())
         skills.register(AudioControlSkill())
         skills.register(DisplayControlSkill())
-        skills.register(AppLaunchSkill())
+        app_index = DesktopIndex()
+        steam_index = SteamIndex()
+        skills.register(AppLaunchSkill(app_index))
+        skills.register(SteamLaunchSkill(steam_index))
         skills.register(SessionControlSkill())
         skills.register(NetworkControlSkill())
         skills.register(PowerControlSkill())
@@ -211,6 +216,15 @@ class KikiApplication(Adw.Application):
             tools, ToolPolicy(self._settings.tools.autonomy), AuditLog(self._db)
         )
         self._executor = executor
+        direct_actions = DirectActionService(
+            ToolGateway(
+                executor,
+                panic_check=lambda: self._settings.app.privacy_panic,
+                integrations_check=self._settings.integrations_active,
+            ),
+            app_index,
+            steam_index,
+        )
         self._routines = routines_repo
         # Routine fires go through the same door as everything else: the
         # gateway's live switches instead of the engine's snapshots, and only
@@ -246,6 +260,7 @@ class KikiApplication(Adw.Application):
             confirm=self._confirm_model_action,
             memories=memories,
             trace_dir=state_dir() / "assistant",
+            direct_actions=direct_actions,
         )
         self._pack = ensure_character_pack(self._settings.character.id)
         wav_dir = cache_dir() / "tts"
@@ -529,7 +544,7 @@ class KikiApplication(Adw.Application):
             params={"Datei": request.target},
             target=request.target,
             effect=request.content,
-            risk=RiskLevel.WRITE,
+            risk=request.risk,
             reason="KIKI hat diese Aktion vorgeschlagen.",
             request_id=request.request_id,
         )
@@ -1329,6 +1344,16 @@ class KikiApplication(Adw.Application):
             # someone talking. Say it, once, and drop the utterance.
             self._toast("KIKI macht gerade Pause.")
             self._say_paused()
+            return False
+        # An exact local start command is resolved against the local app/Steam
+        # indexes by ChatService and executed as Origin.USER. Routing it through
+        # chat preserves transcript, audit, TTS and follow-up while ensuring no
+        # model gets to reinterpret the authorized target.
+        if self._service is not None and self._service.direct_action(text) is not None:
+            self.open_chat()
+            if self._chat is not None:
+                self._chat.submit_transcript(text.strip(), send=True)
+                return True
             return False
         service = self._harness or self._build_harness()
         if service is None:

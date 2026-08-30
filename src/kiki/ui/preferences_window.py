@@ -276,8 +276,8 @@ class PreferencesWindow(Adw.PreferencesDialog):
         agency = Adw.PreferencesGroup(title="Selbstständigkeit")
         agency.set_description(
             "Steuert, was KIKI von sich aus tun darf. Schreibende und externe "
-            "Aktionen zeigen eine Freigabekarte — außer im Jarvis-Modus, der "
-            "bewusst ohne Rückfragen handelt."
+            "Aktionen zeigen eine Freigabekarte. Jarvis darf ausgewählte lokale "
+            "Schreibaktionen ohne Rückfrage ausführen; externe Aktionen nie."
         )
         use_tools = Adw.SwitchRow(title="KIKI darf Werkzeuge selbst aufrufen")
         use_tools.set_subtitle("Aus: KIKI antwortet nur mit Text und fragt dich nach Daten.")
@@ -289,15 +289,14 @@ class PreferencesWindow(Adw.PreferencesDialog):
             "Nur lesen (strict)",
             "Lesen + Steuerung (balanced)",
             "… + Öffnen ohne Nachfrage (trusted)",
-            "… + Alles ohne Rückfragen (jarvis, experimentell)",
+            "… + ausgewählte Schreibaktionen (jarvis, experimentell)",
         ):
             levels.append(label)
         self._autonomy_row = Adw.ComboRow(title="Vertrauensstufe", model=levels)
         self._autonomy_row.set_subtitle(
-            "„trusted“ lässt KIKI Ordner, Dateien, Terminal, Editor und Links selbst "
-            "öffnen — nur in registrierten Workspaces. „jarvis“ handelt zusätzlich "
-            "Schreibendes und Externes ohne Karte; verbotene Befehle, der "
-            "Panic-Schalter und das Audit greifen weiterhin."
+            "„trusted“ lässt KIKI lokale Ordner, Dateien, Terminal und Editor selbst "
+            "öffnen — nur in registrierten Workspaces. „jarvis“ erlaubt zusätzlich "
+            "ausgewählte Schreibaktionen. Externe Aktionen brauchen immer eine Karte."
         )
         current_level = self._settings.tools.autonomy
         self._autonomy_row.set_selected(

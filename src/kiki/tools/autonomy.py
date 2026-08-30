@@ -1,14 +1,14 @@
 """What jarvis autonomy actually means, per tool — not per risk level.
 
-The policy's level table is a blanket: at `jarvis`, every WRITE or EXTERNAL
-tool whose author set `auto_allow` runs unattended. That is broader than the
-deal the security rules describe, and broader than any review can follow once
-more write tools exist. This module is the tool-sharp layer on top: the level
-says how much headroom there is, the spec says which tools may spend it.
+The policy's level table is a blanket: at `jarvis`, every WRITE tool whose
+author set `auto_allow` could run unattended. That is broader than any review
+can follow once more write tools exist. EXTERNAL is stopped by the base policy
+at every level. This module is the tool-sharp layer for the remaining write
+headroom: the level says how much there is, the spec says which tools may use it.
 
 Two sets carry the whole decision:
 
-* `unattended_writes` — the write/external tools that may run unattended at
+* `unattended_writes` — the write tools that may run unattended at
   jarvis, by name, in one reviewable place. Everything else with the same
   risk keeps its approval card: the blanket granted, the spec withheld.
 * `never_unattended` — tools that never run unattended, whatever any level,
@@ -70,7 +70,7 @@ JARVIS_SPEC = AutonomySpec(
 
 _SPECS: dict[AutonomyLevel, AutonomySpec] = {
     AutonomyLevel.JARVIS: JARVIS_SPEC,
-    # The levels below carry no WRITE/EXTERNAL headroom at all — the policy's
+    # The levels below carry no WRITE headroom at all — the policy's
     # table already cards everything this spec would guard. They get the
     # empty spec so `sharpen` has one code path and no level is special.
     AutonomyLevel.STRICT: AutonomySpec(level=AutonomyLevel.STRICT),

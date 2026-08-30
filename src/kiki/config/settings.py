@@ -190,11 +190,10 @@ class IntegrationsSettings:
 class ToolsSettings:
     model_tool_use: bool = False
     # "strict": the model may read unattended. "balanced": reads plus the
-    # declared safety controls. "trusted": additionally opens folders, files,
-    # terminal, editor and http(s) links inside registered workspaces.
-    # "jarvis": acts unattended at every risk level — writes and external
-    # actions included. Opt-in only; the hard deny list, the panic switch and
-    # every spec that withheld auto_allow still bite at this level.
+    # declared safety controls. "trusted": additionally opens local folders,
+    # files, terminal and editor inside registered workspaces. "jarvis": also
+    # permits reviewed writes unattended. External actions always need a fresh
+    # confirmation. Opt-in only; hard deny, panic and author veto still bite.
     autonomy: str = "balanced"
     max_steps: int = 6
     max_tool_calls: int = 12

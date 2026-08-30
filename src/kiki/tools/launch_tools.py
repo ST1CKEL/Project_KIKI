@@ -1,8 +1,8 @@
 """Openers KIKI may run herself.
 
 These are the same seven declared desktop actions the control window offers, but
-bound to real handlers and reclassified as `RiskLevel.LAUNCH`: they open
-something visible on the user's own desktop and change no data.
+bound to real handlers. Local targets are reclassified as `RiskLevel.LAUNCH`;
+opening an http(s) URL keeps `RiskLevel.EXTERNAL` and therefore always asks.
 
 What stays unchanged, and is the reason this is defensible without an approval
 card at the `trusted` level:
@@ -13,7 +13,8 @@ card at the `trusted` level:
 * Files must resolve inside that workspace (`resolve_inside_workspace`).
 * Terminal and editor use fixed argv templates from an allowlist. There is no
   shell string and no `-c`, so nothing the model writes becomes a command.
-* URLs are http/https only, with no credentials — `validate_http_url`.
+* URLs are http/https only, with no credentials — `validate_http_url` — and
+  keep their external-action confirmation at every autonomy level.
 * Clipboard and notification are **not** here. Replacing the clipboard changes
   data the user owns, so it keeps its card.
 """
@@ -54,9 +55,14 @@ def _launchable(spec: ToolSpec, handler: Callable[[dict[str, Any]], dict[str, An
     The declarations in `workspace_tools` stay untouched: the control window
     keeps using them for its previews, and this derives executable copies.
     """
+    risk = (
+        RiskLevel.EXTERNAL
+        if spec.risk is RiskLevel.EXTERNAL and spec.name == "browser.open_url"
+        else RiskLevel.LAUNCH
+    )
     return dataclasses.replace(
         spec,
-        risk=RiskLevel.LAUNCH,
+        risk=risk,
         handler=handler,
         auto_allow=True,
         model_callable=True,

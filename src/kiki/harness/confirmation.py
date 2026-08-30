@@ -1,4 +1,4 @@
-"""What a person is shown before a write, and nothing more.
+"""What a person is shown before a confirmable action, and nothing more.
 
 This module used to mint its own authorisation: a sixteen-character fingerprint
 over the run, the call and the proposed content, held in a one-shot slot, with
@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from kiki.tools.confirmation import ConfirmationError
+from kiki.tools.policy import RiskLevel
 from kiki.tools.registry import ActionPreview
 
 __all__ = ["ConfirmationError", "ConfirmationRequest"]
@@ -42,6 +43,7 @@ class ConfirmationRequest:
     target: str
     content: str
     request_id: str = ""
+    risk: RiskLevel = RiskLevel.WRITE
 
     @classmethod
     def from_preview(
@@ -56,4 +58,5 @@ class ConfirmationRequest:
             target=preview.target,
             content=preview.effect,
             request_id=preview.request_id,
+            risk=preview.risk,
         )

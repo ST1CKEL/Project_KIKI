@@ -136,6 +136,11 @@ class RoutinesSkill:
         spec = self._tools.get(tool_name)
         if spec is None:
             return f"Unbekanntes Werkzeug „{tool_name}“ — Default Deny."
+        if spec.risk is RiskLevel.EXTERNAL:
+            return (
+                f"„{tool_name}“ ist extern und braucht bei jedem Aufruf eine "
+                "aktuelle Nutzerbestätigung; deshalb ist es nicht routinenfähig."
+            )
         if not spec.auto_allow:
             return f"„{tool_name}“ ist nicht routinenfähig (erlaubt keine unbeaufsichtigten Aufrufe)."
         try:

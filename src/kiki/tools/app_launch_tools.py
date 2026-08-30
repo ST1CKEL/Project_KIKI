@@ -11,6 +11,7 @@ from __future__ import annotations
 import configparser
 import logging
 import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -233,8 +234,6 @@ class AppLaunchSkill:
                     "app.list zeigt die verfügbaren app_ids."
                 ),
             }
-        import shutil
-
         gio = shutil.which("gio")
         if gio is None:
             return {"ok": False, "error": "gio nicht gefunden — Start nicht möglich."}

@@ -29,6 +29,7 @@ from kiki.runtime.event_bus import EventBus
 from kiki.storage.chat_repository import ChatRepository, Conversation
 from kiki.storage.memory_repository import MemoryRepository
 from kiki.storage.secrets import SecretStore
+from kiki.tools.direct_actions import DirectActionService, DirectLaunchRequest
 from kiki.tools.executor import ToolExecutor, ToolResult
 from kiki.tools.exposure import declarations
 from kiki.tools.gateway import ToolGateway
@@ -73,6 +74,7 @@ class ChatService:
         confirm: AssistantConfirm | None = None,
         memories: MemoryRepository | None = None,
         trace_dir: Path | None = None,
+        direct_actions: DirectActionService | None = None,
     ) -> None:
         self._settings = settings
         self._chats = chats
@@ -82,6 +84,7 @@ class ChatService:
         self._confirm = confirm
         self._memories = memories
         self._trace_dir = trace_dir
+        self._direct_actions = direct_actions
         self._planner = ContextPlanner()
         # Diagnostics only. The plan a request is built from is passed down the
         # call chain; reading this back after concurrent turns reports whichever
@@ -133,6 +136,12 @@ class ChatService:
                 return found
         return self._chats.create_conversation()
 
+    def direct_action(self, text: str) -> DirectLaunchRequest | None:
+        """Return a bounded local action only when the input is an exact command."""
+        if self._direct_actions is None:
+            return None
+        return self._direct_actions.parse(text)
+
     async def send(
         self,
         conversation_id: str,
@@ -159,6 +168,11 @@ class ChatService:
         if history == []:
             title = user_text.strip().split("\n", 1)[0][:48] if user_text.strip() else "Bildfrage"
             self._chats.rename_conversation(conversation_id, title or "Chat")
+        direct = self.direct_action(user_text) if not images and not status_snapshot else None
+        if direct is not None:
+            async for event in self._run_direct(conversation_id, direct):
+                yield event
+            return
         # Size the context to what this turn actually needs. A greeting must
         # not pay the prefill of a code review: measured on qwen3-vl:4b, 8.6k
         # prompt tokens cost 2.75 s before the first word, 3.0k cost 1.10 s.
@@ -238,6 +252,37 @@ class ChatService:
             self._chats.add_message(conversation_id, "assistant", "_Leere Antwort vom Modell._")
         self._bus.emit("chat.stream.done", conversation_id=conversation_id, ok=True, text=answer)
         yield StreamEvent(kind="done", text=answer)
+
+    async def _run_direct(
+        self,
+        conversation_id: str,
+        request: DirectLaunchRequest,
+    ) -> AsyncIterator[StreamEvent]:
+        """Execute a locally resolved user command without consulting a model."""
+        assert self._direct_actions is not None
+        self._bus.emit("chat.stream.start", conversation_id=conversation_id)
+        try:
+            result = await self._direct_actions.execute(request)
+        except Exception as exc:
+            log.warning("direct local action failed: %s", type(exc).__name__)
+            answer = "Der lokale Start ist unerwartet fehlgeschlagen."
+            self._chats.add_message(conversation_id, "assistant", answer)
+            self._bus.emit("chat.stream.error", conversation_id=conversation_id, error=answer)
+            self._bus.emit("chat.stream.done", conversation_id=conversation_id, ok=False)
+            yield StreamEvent(kind="error", text=answer)
+            return
+        self._bus.emit("chat.stream.speaking", conversation_id=conversation_id)
+        self._bus.emit("chat.stream.delta", conversation_id=conversation_id, text=result.answer)
+        yield StreamEvent(kind="delta", text=result.answer)
+        stored = _with_tool_note(result.answer, [result.tool] if result.ok and result.tool else [])
+        self._chats.add_message(conversation_id, "assistant", stored)
+        self._bus.emit(
+            "chat.stream.done",
+            conversation_id=conversation_id,
+            ok=True,
+            text=result.answer,
+        )
+        yield StreamEvent(kind="done", text=result.answer)
 
     async def _run_plain(
         self, messages: list[ChatMessage], *, model: str, plan: PlannedContext | None = None

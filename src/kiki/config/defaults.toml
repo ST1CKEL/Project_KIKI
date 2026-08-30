@@ -99,12 +99,12 @@ model_tool_use = true
 # How far a model-initiated call gets without a dialog.
 #   "strict"   — reading only.
 #   "balanced" — reading plus the declared safety controls.
-#   "trusted"  — additionally opening folders, files, a terminal, the editor and
-#                http(s) links, and only inside registered workspaces.
-#   "jarvis"   — everything unattended, writes and external actions included.
+#   "trusted"  — additionally opening local folders, files, a terminal and the
+#                editor, and only inside registered workspaces.
+#   "jarvis"   — additionally allows reviewed writes without a question.
 #                Opt-in "Jarvis mode". The hard deny list, the panic switch and
 #                every tool that withheld auto_allow still bite at this level.
-# Outside "jarvis", writing and external actions always show the approval card.
+# External actions always show the approval card, including in "jarvis".
 autonomy = "balanced"
 # Hard bounds per turn, so a confused model cannot spin.
 max_steps = 6

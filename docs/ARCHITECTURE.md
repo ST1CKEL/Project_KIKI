@@ -44,7 +44,7 @@ KIKI ist eine **GTK4/libadwaita-Anwendung** mit einem **GI-freien Kern**. Die Fi
 | TTS | Eigener Dienst `kiki-tts` mit **Qwen3-TTS-12Hz-0.6B-CustomVoice** auf CUDA. Default-Stimme **Serena**, Sprache **German**. GTK spielt WAV über PipeWire; Syntheseaufträge sind abbrechbar und verspätete WAVs werden verworfen. Loopback only. |
 | Tools | Default Deny. Unbekannte Namen und eine Hard-Deny-Liste (`run_shell`, `sudo`, …) laufen nie. |
 | Modell-Tool-Use | **An** (Phase 2A). Nur Tools mit `model_callable = true` sind für das Modell sichtbar; Policy, Freigabekarte und Audit bleiben unverändert auf dem Pfad. |
-| Vertrauensstufe | `tools.autonomy`: `strict` (lesen), `balanced` (Default: + deklarierte Steuerung), `trusted` (+ Öffnen in registrierten Workspaces), `jarvis` (opt-in: alles unbeaufsichtigt, auch Schreiben/Extern — Phase 3A). Außerhalb `jarvis` fragen Schreiben und Extern auf jeder Stufe. |
+| Vertrauensstufe | `tools.autonomy`: `strict` (lesen), `balanced` (Default: + deklarierte Steuerung), `trusted` (+ lokales Öffnen in registrierten Workspaces), `jarvis` (opt-in: + einzeln geprüfte Schreibwerkzeuge — Phase 3A). EXTERNAL fragt in jeder Stufe, auch `jarvis`. |
 | Charakter | `renderer = "frames"` in `manifest.toml`. Später lottie/spine/live2d ohne Chat-Umbau. |
 | App-ID | `io.github.projectkiki.Kiki` |
 | Lizenz | MIT |
@@ -120,7 +120,7 @@ GNOME  auf Fedora 44 nutzt Wayland. Das ist die größte technische Grenze eines
 - Umschaltbare Persona, feste Regeln davon getrennt (Phase 2D)
 - Proaktive Meldungen zu Akku und Speicher, mit Ruhezeiten (Phase 2E)
 - Desktop-Steuerung: MPRIS-Medien, Lautstärke (pactl), Helligkeit (GNOME/KDE-Kaskade), App-Start über .desktop-Einträge, Bildschirm sperren (Phase 3A)
-- Jarvis-Modus `tools.autonomy = "jarvis"`: unbeaufsichtigte Ausführung auf allen Risikostufen, opt-in (Phase 3A)
+- Jarvis-Modus `tools.autonomy = "jarvis"`: unbeaufsichtigte Ausführung einzeln geprüfter Schreibwerkzeuge, opt-in; EXTERNAL bleibt immer bestätigungspflichtig (Phase 3A)
 - Freigegebene Wenn-Dann-Routinen (Akku/Speicher → Werkzeugaufruf), in den Einstellungen verwaltbar (Phase 3B)
 - System & Netzwerk: WLAN-Gerät schalten, Netzwerke anzeigen, VPN verbinden/trennen (NetworkManager), Ruhezustand/Neustart/Ausschalten (logind) (Phase 3C)
 
@@ -467,7 +467,8 @@ und ohne Registrierung. Das Modell hatte gar keinen Weg dorthin.
 
 `kiki/tools/launch_tools.py` leitet daraus **ausführbare Kopien** ab
 (`dataclasses.replace`) — die Deklarationen für die Kontrollfenster-Vorschau
-bleiben unverändert. Dazu eine neue Risikostufe:
+bleiben unverändert. Lokale Öffner bekommen dabei eine eigene Risikostufe;
+`browser.open_url` bleibt EXTERNAL:
 
 `RiskLevel.LAUNCH` — öffnet etwas Sichtbares auf dem eigenen Desktop, ändert
 keine Daten, und was aufgeht, treibt weiterhin der Nutzer. Bewusst getrennt von
@@ -492,9 +493,11 @@ Was die Lockerung eingrenzt:
 - Dateien müssen über `resolve_inside_workspace` im Workspace bleiben.
 - Terminal und Editor nutzen feste Argv-Vorlagen aus einer Allowlist. Kein
   Shell-String, kein `-c` — Modelltext wird nie zum Kommando.
-- URLs nur `http`/`https`, ohne Zugangsdaten.
-- Der Nutzerpfad (`Origin.USER`) ist unverändert: LAUNCH verlangt dort weiterhin
-  eine Bestätigung, damit das Kontrollfenster seine Freigabekarte behält.
+- URLs nur `http`/`https`, ohne Zugangsdaten; weil sie EXTERNAL bleiben, fragen
+  sie auf jeder Vertrauensstufe einschließlich `jarvis`.
+- Ein an der Eingabegrenze erkannter, eindeutiger Direktstart ist
+  `Origin.USER`: Die Anweisung selbst ist die Freigabe, daher verlangt LAUNCH
+  keine zweite Karte. Modellinitiierte Starts folgen weiter der Stufentabelle.
 - Panic entfernt die Werkzeuge auf jeder Stufe.
 
 Die Obergrenzen des Agent-Loops (`max_tool_calls`, Wiederholungserkennung)
@@ -551,18 +554,18 @@ Build-Watcher fehlen noch; der Kalender bräuchte eine neue
 ### Phase 3A — Jarvis-Modus und Desktop-Steuerung
 
 `AutonomyLevel.JARVIS` erweitert die Tabelle unbeaufsichtigter Risikostufen um
-WRITE und EXTERNAL — die einzige Stelle, an der beide vorkommen. Es ist eine
-bewusste Nutzerentscheidung (Einstellungen → Vertrauensstufe, nie Default),
-kein Zustand, in den die Anwendung von selbst gerät. Was auch in dieser Stufe
-weiterhin stoppt: die Hard-Deny-Liste, unbekannte Tools, der Panic-Schalter,
-der Integrationsschalter, das `model_callable`-Gate — und jedes Tool, dessen
-Autor `auto_allow` nicht gesetzt hat. Dieses Autoren-Veto rangiert über jeder
-Stufe; `routines.create`, `routines.delete`, Zwischenablage und Gedächtnis
-behalten ihre Karte daher selbst im Jarvis-Modus.
+WRITE. Es ist eine bewusste Nutzerentscheidung (Einstellungen →
+Vertrauensstufe, nie Default), kein Zustand, in den die Anwendung von selbst
+gerät. EXTERNAL steht absichtlich in keiner Stufe: Nutzer- und Modellaufrufe
+zeigen immer eine frische Karte, Routinen werden abgelehnt, weil dort niemand
+interaktiv bestätigen kann. Weiterhin stoppen Hard-Deny-Liste, unbekannte
+Tools, Panic, Integrationsschalter, `model_callable`-Gate und jedes Tool, dessen
+Autor `auto_allow` nicht gesetzt hat. `routines.create`, `routines.delete`,
+Zwischenablage und Gedächtnis behalten ihre Karte auch im Jarvis-Modus.
 
-Der `Origin.USER`-Pfad ist unverändert: Ein Klick fragt so oft wie vorher.
-Der Modus weitet, was das *Modell* entscheiden darf, nicht was ein Dialog
-überspringt.
+Der `Origin.USER`-Pfad erlaubt lokale LAUNCH-Aktionen ohne zweite Nachfrage,
+wenn eine vertrauenswürdige Eingabegrenze den expliziten Befehl bereits an ein
+Allowlist-Ziel gebunden hat. WRITE fragt weiter; EXTERNAL fragt ausnahmslos.
 
 Fünf neue Skills erreichen den Desktop über dieselbe Werkzeug-Schicht wie
 alles andere (ToolSpec → Policy → Executor → Audit):
@@ -573,7 +576,16 @@ alles andere (ToolSpec → Policy → Executor → Audit):
 | `audio_control` | `audio.volume_get/set`, `audio.mute` | READ/CONTROL | `pactl` mit festem argv, numerisch validiert, `LC_ALL=C` gegen Locale-Fallen |
 | `display_control` | `display.brightness_get/set` | READ/CONTROL | GNOME-SettingsDaemon first, Plasma-6.3+-Displays als Fallback (kein gemeinsames API beider Desktops) |
 | `app_launch` | `app.list`, `app.open` | READ/LAUNCH | Index aus den zwei XDG-Verzeichnissen; Start nur über `gio launch <datei>`, kein Exec-Parsen |
+| `steam_launch` | `steam.list_installed`, `steam.launch` | READ/LAUNCH | Lokale Steam-Manifeste; Start nur über `steam -applaunch <numerische app_id>` (nativ oder Flatpak) |
 | `session_control` | `session.lock` | CONTROL | `org.freedesktop.ScreenSaver`, Fallback `org.gnome.ScreenSaver` |
+
+`kiki/tools/direct_actions.py` erkennt nur einen einzelnen Imperativ wie
+„Starte Firefox“ oder „Öffne Hades über Steam“. Das Ziel wird gegen
+`DesktopIndex` beziehungsweise `SteamIndex` aufgelöst; erst die gefundene ID
+geht als `Origin.USER` durch Gateway, Policy, Executor und Audit. URLs,
+Pfadsyntax und zusammengesetzte Anweisungen werden nicht als Direktstart
+behandelt. Derselbe Chatpfad bewahrt Verlauf, TTS und Voice-Follow-up; ein LLM
+wird für diese Direktaktion nicht aufgerufen.
 
 D-Bus-Zugriff liegt in `kiki/platform/dbus.py` hinter kleinen Klassen, die
 Tests ersetzen können; kein Test braucht einen echten Bus. Suspend, Reboot,
@@ -603,6 +615,8 @@ Die Ausführung läuft durch denselben `ToolExecutor` wie alles andere, mit
 - Policy: erlaubt nur Tools mit `auto_allow=True` (Autoren-Veto gilt). Eine
   dauerhafte Verweigerung (Werkzeug weg, Freigabe entzogen) schaltet die
   Routine ab, statt sie in jedem Tick erneut ins Audit zu schreiben.
+- EXTERNAL ist auch mit `auto_allow=True` nicht routinenfähig: Jede externe
+  Aktion braucht eine neue interaktive Bestätigung.
 - Panic und Integrationsschalter werden bei jedem Tick neu gelesen.
 - Cooldown (Default 30 min) verhindert, dass eine festsitzende Messgröße ein
   Werkzeug hämmert; `battery.percent` existiert nur im entladenden Zustand,
@@ -650,7 +664,7 @@ eigenen Guardrails — nicht einfach ein weiteres Tool.
 - Stop verändert ausschließlich eine bekannte, noch laufende Session. Pro Workspace darf zugleich nur eine aktive Agent-Session existieren.
 - Ein Testlauf mit Session-Bezug muss demselben Workspace angehören. Stdout und stderr werden parallel geleert; UI und Persistenz erhalten eine auf 64 KiB begrenzte, bei Bedarf markierte Ausgabe.
 - TTS-Stop löscht Warteschlangen, bricht den aktiven Syntheseauftrag ab und verwirft Ergebnisse älterer Synthese-Generationen.
-- PC-Aktionen laufen ausschließlich über eine feste Siebener-Allowlist im Observe-Profil. Gesprochener Text darf nur das Kontrollfenster öffnen, nie eine Aktion ausführen.
+- PC-Aktionen laufen ausschließlich über deklarierte Allowlist-Tools im Observe-Profil. Gesprochener Text darf zusätzlich genau einen lokalen App- oder Steam-Start auslösen, wenn der Direktparser ihn eindeutig an einen indexierten Eintrag bindet; alle anderen freien Aktionen bleiben im Modell-/Bestätigungspfad.
 - Zwischenablage- und Benachrichtigungstexte erscheinen in der sichtbaren Vorschau, werden aber in persistenten Freigabeparametern redigiert und nicht im Audit wiederholt.
 - Die Mikrofon-Pipeline wartet begrenzt auf EOS, bevor sie auf NULL wechselt, damit `wavenc` einen gültigen RIFF/WAV-Header schreibt.
 

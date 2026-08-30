@@ -355,6 +355,38 @@ def test_skill_create_rejects_unroutinable_tool(tmp_path) -> None:
     assert repo.list() == []
 
 
+def test_skill_create_rejects_external_tool_even_when_auto_allowed(tmp_path) -> None:
+    db = Database(tmp_path / "kiki.sqlite3")
+    repo = RoutineRepository(db)
+    registry, _executed = _tool_registry()
+    registry.register(
+        ToolSpec(
+            name="external.notify",
+            title="Extern",
+            description="Verlässt die lokale Grenze.",
+            risk=RiskLevel.EXTERNAL,
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=lambda _params: {"ok": True},
+            effect="Extern.",
+            auto_allow=True,
+        )
+    )
+    skill = RoutinesSkill(repo, registry)
+    result = _specs(skill)["routines.create"].handler(
+        {
+            "name": "Nicht extern feuern",
+            "metric": "battery.percent",
+            "op": "lt",
+            "value": 15,
+            "tool": "external.notify",
+            "arguments": {},
+        }
+    )
+    assert result["ok"] is False
+    assert "bei jedem Aufruf" in result["error"]
+    assert repo.list() == []
+
+
 def test_skill_create_rejects_mismatched_arguments(tmp_path) -> None:
     skill, _repo = _skill(tmp_path)
     result = _specs(skill)["routines.create"].handler(

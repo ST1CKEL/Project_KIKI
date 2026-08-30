@@ -1,11 +1,11 @@
-"""Jarvis autonomy, tool by tool: the blanket says the level may, the spec
-says which tools do.
+"""Jarvis write autonomy, tool by tool: the blanket says the level may, the
+spec says which tools do.
 
-The policy's level table stays untouched and keeps its own promises (Martin's
-tests prove them). This layer sits where things actually run: an allowed,
-model-initiated jarvis call that the spec does not cover becomes an approval
-card over the same validated arguments. Nothing here can make anything run —
-`sharpen` only turns an unattended run into a question.
+The base policy independently keeps EXTERNAL confirmation-only. This layer sits
+where things actually run: an allowed, model-initiated jarvis WRITE call that
+the spec does not cover becomes an approval card over the same validated
+arguments. Nothing here can make anything run — `sharpen` only turns an
+unattended run into a question.
 """
 
 from __future__ import annotations

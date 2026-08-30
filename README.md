@@ -98,7 +98,7 @@ KIKI verwendet einen gemeinsamen **Assistant-Core** (`kiki.assistant`) für norm
 1. **Ein gemeinsamer Runner:** Chat und `/agent` verwenden denselben `AssistantRunner` für Streaming, Werkzeugschritte, Limits und Abbruch.
 2. **Ein gemeinsamer Sicherheitsweg:** Jeder Werkzeugaufruf läuft über `ToolGateway`, `ToolPolicy`, Bestätigungsbroker und Audit. Panic- und Integrationsstatus werden unmittelbar vor einem Seiteneffekt erneut geprüft.
 3. **Run-gebundener Statusbalken:** Während der Ausführung erscheint im Chatfenster ein kompakter Statusbalken mit Spinner und **`[Abbrechen]`-Button**.
-4. **Sichere Bestätigung:** Schreibende und externe Aktionen verlangen außerhalb des expliziten Jarvis-Modus eine interaktive Genehmigung. Freigaben sind einmalig an Run, Tool-Aufruf, validierte Argumente und angezeigte Vorschau gebunden.
+4. **Sichere Bestätigung:** Externe Aktionen verlangen immer eine interaktive Genehmigung; schreibende Aktionen ebenfalls, außer bei den einzeln geprüften Jarvis-Werkzeugen. Freigaben sind einmalig an Run, Tool-Aufruf, validierte Argumente und angezeigte Vorschau gebunden.
 5. **Stabile Run-Identität (`run_id`):** Verspätete Callbacks, Freigaben oder Events eines alten Laufs können keinen aktuellen Lauf verändern.
 6. **Harte Laufgrenzen:** Schrittzahl, Werkzeugaufrufe und Wiederholungen sind begrenzt; Protokollfehler enden sichtbar statt mit einer unvollständigen Antwort.
 
@@ -305,8 +305,9 @@ Ausführliche Latenzanalysen und Architekturdetails: [docs/VOICE_SUBSYSTEM.md](d
 ### Desktop-Steuerung & Jarvis-Modus
 - **Medien & Audio:** MPRIS-Steuerung (Play/Pause/Next + Metadaten), Lautstärke und Stummschaltung über `pactl`.
 - **Display & Sitzung:** Helligkeit über GNOME-/KDE-Sitzungsbus, Bildschirm sperren.
-- **Anwendungen starten:** Index aller installierten `.desktop`-Einträge, Start über `gio launch` — ohne Shell, ohne Modelltext im Kommando.
-- **Jarvis-Modus (experimentell):** Vertrauensstufe `jarvis` lässt KIKI auf allen Risikostufen ohne Rückfragen handeln; Hard-Deny-Liste, Panic-Schalter und Audit greifen weiterhin.
+- **Anwendungen direkt starten:** Ein eindeutiges „Starte Firefox“ gilt selbst als Freigabe. KIKI bindet den Namen vor jedem Modellaufruf an einen installierten `.desktop`-Eintrag und startet nur dessen feste `gio launch`-ID.
+- **Steam-Spiele:** Lokal installierte Spiele werden aus `appmanifest_*.acf` erkannt und ausschließlich über `steam -applaunch <numerische ID>` gestartet — nie über eine frei gebildete URL oder Shell.
+- **Jarvis-Modus (experimentell):** Vertrauensstufe `jarvis` erlaubt ausgewählte, einzeln geprüfte Schreibaktionen ohne Rückfrage. Externe Aktionen brauchen auch dann immer eine aktuelle Freigabe; Hard-Deny-Liste, Panic-Schalter und Audit greifen weiterhin.
 - **System & Netzwerk:** WLAN-Gerät schalten und Netzwerke anzeigen (NetworkManager), bestehende VPN-/WireGuard-Verbindungen per UUID verbinden und trennen, Ruhezustand/Neustart/Ausschalten über logind.
 - **Freigegebene Routinen:** Wenn-Dann-Rezepte („Akku < 15 % → Aktion“), die einmal als komplette Karte bestätigt werden und dann ohne erneute Frage feuern — mit Cooldown, Panic-Stopp und Audit-Eintrag `routine`.
 
@@ -322,7 +323,7 @@ Ausführliche Latenzanalysen und Architekturdetails: [docs/VOICE_SUBSYSTEM.md](d
 
 ### Sicherheit, Tool-Policy & Panic-Button
 - **Default Deny:** Gefährliche Systembefehle (`sudo`, freie Shells wie `sh -c "rm -rf ..."`) sind hart geblockt.
-- **Interaktive Genehmigungskarten:** Bei Dateiänderungen oder externen Zugriffen fragt KIKI mit Diff-Vorschau um Erlaubnis.
+- **Interaktive Genehmigungskarten:** Bei Dateiänderungen fragt KIKI nach Policy um Erlaubnis; bei externen Aktionen ausnahmslos jedes Mal. Die Karte zeigt die echte Risikostufe und ist an genau einen Aufruf gebunden.
 - **Panic-Button:** Bricht sofort alle laufenden LLM-Streams, TTS-Ausgaben und Hintergrund-Subprozesse ab.
 
 ---

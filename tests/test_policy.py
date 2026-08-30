@@ -77,18 +77,57 @@ def test_write_requires_confirm() -> None:
     assert decision.kind is DecisionKind.CONFIRM
 
 
-def test_jarvis_allows_write_and_external_unattended() -> None:
+def test_jarvis_allows_write_but_every_external_action_still_confirms() -> None:
     policy = ToolPolicy(AutonomyLevel.JARVIS.value)
-    for risk in (RiskLevel.WRITE, RiskLevel.EXTERNAL):
+    write = policy.evaluate(
+        name="do_write",
+        params={},
+        spec=_spec(name="do_write", risk=RiskLevel.WRITE, auto_allow=True, model_callable=True),
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.MODEL,
+    )
+    external = policy.evaluate(
+        name="do_external",
+        params={},
+        spec=_spec(
+            name="do_external", risk=RiskLevel.EXTERNAL, auto_allow=True, model_callable=True
+        ),
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.MODEL,
+    )
+    assert write.kind is DecisionKind.ALLOW
+    assert external.kind is DecisionKind.CONFIRM
+
+
+def test_external_action_always_confirms_and_cannot_run_as_a_routine() -> None:
+    spec = _spec(
+        name="leave_machine",
+        risk=RiskLevel.EXTERNAL,
+        auto_allow=True,
+        model_callable=True,
+    )
+    policy = ToolPolicy(AutonomyLevel.JARVIS.value)
+    for origin in (Origin.USER, Origin.MODEL):
         decision = policy.evaluate(
-            name=f"do_{risk.value}",
+            name=spec.name,
             params={},
-            spec=_spec(name=f"do_{risk.value}", risk=risk, auto_allow=True, model_callable=True),
+            spec=spec,
             panic=False,
             integrations_enabled=True,
-            origin=Origin.MODEL,
+            origin=origin,
         )
-        assert decision.kind is DecisionKind.ALLOW
+        assert decision.kind is DecisionKind.CONFIRM
+    routine = policy.evaluate(
+        name=spec.name,
+        params={},
+        spec=spec,
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.ROUTINE,
+    )
+    assert routine.kind is DecisionKind.DENY
 
 
 def test_jarvis_still_confirms_when_author_withheld_auto_allow() -> None:
@@ -140,6 +179,18 @@ def test_jarvis_leaves_user_origin_unchanged() -> None:
         origin=Origin.USER,
     )
     assert decision.kind is DecisionKind.CONFIRM
+
+
+def test_explicit_user_origin_launch_is_already_the_confirmation() -> None:
+    decision = ToolPolicy().evaluate(
+        name="app.open",
+        params={},
+        spec=_spec(name="app.open", risk=RiskLevel.LAUNCH, auto_allow=True),
+        panic=False,
+        integrations_enabled=True,
+        origin=Origin.USER,
+    )
+    assert decision.kind is DecisionKind.ALLOW
 
 
 def test_coerce_recognises_jarvis() -> None:

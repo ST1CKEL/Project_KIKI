@@ -67,19 +67,20 @@ class AutonomyLevel(StrEnum):
     STRICT = "strict"
     BALANCED = "balanced"
     TRUSTED = "trusted"
-    # Opt-in "Jarvis" mode: the user explicitly accepted that KIKI acts
-    # unattended at every risk level, writes and external actions included.
-    # It is never a default. What still stops a call down here: the hard deny
-    # list, unknown tools, the panic switch, the integration lockout — and
+    # Opt-in "Jarvis" mode: the user explicitly accepted that KIKI may also
+    # write unattended. External actions remain confirmation-only at every
+    # level. It is never a default. What still stops a call down here: the hard
+    # deny list, unknown tools, the panic switch, the integration lockout — and
     # every spec whose author withheld `auto_allow`.
     JARVIS = "jarvis"
 
 
 VALID_AUTONOMY: tuple[str, ...] = tuple(level.value for level in AutonomyLevel)
 
-# Risk tiers a model-initiated call may trigger unattended, per level. WRITE and
-# EXTERNAL appear in exactly one place: JARVIS, an explicitly chosen mode.
-# Everywhere else, changing data and leaving the machine need a human.
+# Risk tiers a model-initiated call may trigger unattended, per level. WRITE
+# appears in exactly one place: JARVIS, an explicitly chosen mode. EXTERNAL is
+# deliberately absent everywhere: leaving the machine always needs a fresh,
+# interactive confirmation.
 _UNATTENDED: dict[AutonomyLevel, frozenset[RiskLevel]] = {
     AutonomyLevel.STRICT: frozenset({RiskLevel.READ}),
     AutonomyLevel.BALANCED: frozenset({RiskLevel.READ, RiskLevel.CONTROL}),
@@ -92,7 +93,6 @@ _UNATTENDED: dict[AutonomyLevel, frozenset[RiskLevel]] = {
             RiskLevel.CONTROL,
             RiskLevel.LAUNCH,
             RiskLevel.WRITE,
-            RiskLevel.EXTERNAL,
         }
     ),
 }
@@ -155,6 +155,25 @@ class ToolPolicy:
                 reason=f"Ungültige Parameter: {exc}",
                 risk=spec.risk,
             )
+        if spec.risk is RiskLevel.EXTERNAL:
+            # Product invariant, stronger than profiles and autonomy levels:
+            # every action that leaves KIKI's local boundary gets a fresh
+            # interactive confirmation. A routine has nobody present to
+            # answer that card, so it must fail closed instead of treating an
+            # old recipe approval as a reusable external grant.
+            if origin is Origin.ROUTINE:
+                return PolicyDecision(
+                    kind=DecisionKind.DENY,
+                    reason="Externe Aktionen dürfen nicht unbeaufsichtigt als Routine laufen.",
+                    risk=spec.risk,
+                    params=cleaned,
+                )
+            return PolicyDecision(
+                kind=DecisionKind.CONFIRM,
+                reason="Externe Aktion — eine aktuelle Nutzerbestätigung ist immer erforderlich.",
+                risk=spec.risk,
+                params=cleaned,
+            )
         if origin is Origin.ROUTINE:
             # The recipe behind this call was confirmed by a human when the
             # routine was created. What still has to hold: the tool's author
@@ -199,20 +218,24 @@ class ToolPolicy:
                 risk=spec.risk,
                 params=cleaned,
             )
-        if spec.risk in {RiskLevel.READ, RiskLevel.CONTROL}:
+        if spec.risk in {RiskLevel.READ, RiskLevel.CONTROL, RiskLevel.LAUNCH}:
             return PolicyDecision(
                 kind=DecisionKind.ALLOW,
                 reason=(
                     "Explizite Sicherheitssteuerung, ohne zusätzliche Bestätigung."
                     if spec.risk is RiskLevel.CONTROL
-                    else "Lesendes Tool, Allowlist, ohne Bestätigung."
+                    else (
+                        "Expliziter lokaler Startbefehl — Ziel ist an die Allowlist gebunden."
+                        if spec.risk is RiskLevel.LAUNCH
+                        else "Lesendes Tool, Allowlist, ohne Bestätigung."
+                    )
                 ),
                 risk=spec.risk,
                 params=cleaned,
             )
         return PolicyDecision(
             kind=DecisionKind.CONFIRM,
-            reason="Schreibende oder externe Aktion — Nutzerbestätigung erforderlich.",
+            reason="Schreibende Aktion — Nutzerbestätigung erforderlich.",
             risk=spec.risk,
             params=cleaned,
         )

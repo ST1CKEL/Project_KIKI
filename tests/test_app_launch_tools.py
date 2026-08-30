@@ -120,6 +120,11 @@ def test_open_is_launch_risk_and_model_callable(apps) -> None:
         panic=False, integrations_enabled=True, origin=Origin.MODEL,
     )
     assert trusted.kind is DecisionKind.ALLOW
+    explicit = ToolPolicy().evaluate(
+        name=spec.name, params={"app_id": "firefox"}, spec=spec,
+        panic=False, integrations_enabled=True, origin=Origin.USER,
+    )
+    assert explicit.kind is DecisionKind.ALLOW
 
 
 def test_index_refreshes_when_directory_changes(apps, tmp_path) -> None:
