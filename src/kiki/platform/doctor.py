@@ -78,7 +78,7 @@ def build_doctor_report(settings: Settings) -> DoctorReport:
         _ram_check(_read_text(Path("/proc/meminfo"))),
         _gpu_check(),
         _audio_check(),
-        _voice_check(),
+        _voice_check(settings.voice.stt_model),
         _system_tts_check(),
         _opencode_check(settings.agents.opencode_binary),
     ]
@@ -199,13 +199,15 @@ def _audio_check() -> DoctorCheck:
     return DoctorCheck("audio", DoctorStatus.LIMITED, "PipeWire-Werkzeuge fehlen")
 
 
-def _voice_check() -> DoctorCheck:
+def _voice_check(model_id: str) -> DoctorCheck:
     runtime = vosk_runtime_available()
-    model = vosk_model_ready()
+    model = vosk_model_ready(model_id)
     if runtime and model:
-        return DoctorCheck("stt", DoctorStatus.READY, "Vosk und Sprachmodell bereit")
+        return DoctorCheck("stt", DoctorStatus.READY, f"Vosk und {model_id} bereit")
     if runtime:
-        return DoctorCheck("stt", DoctorStatus.LIMITED, "Vosk bereit, Sprachmodell fehlt")
+        return DoctorCheck(
+            "stt", DoctorStatus.LIMITED, f"Vosk bereit, Sprachmodell {model_id} fehlt"
+        )
     return DoctorCheck("stt", DoctorStatus.LIMITED, "Vosk-Laufzeit fehlt")
 
 

@@ -17,6 +17,9 @@ _DEFAULTS_FILE = Path(__file__).with_name("defaults.toml")
 
 VALID_PROVIDERS = ("ollama", "openai_compatible", "kiki_harness")
 VALID_ANCHORS = ("bottom-right", "bottom-left", "top-right", "top-left")
+# Must mirror kiki.voice.stt.VOSK_MODELS; config may only pick pinned models.
+DEFAULT_STT_MODEL = "vosk-model-small-de-0.15"
+VALID_STT_MODELS = ("vosk-model-small-de-0.15", "vosk-model-de-0.21")
 VALID_TTS_SPEAKERS = (
     "Vivian",
     "Serena",
@@ -245,6 +248,10 @@ class ResponsePolicySettings:
 class VoiceSettings:
     enabled: bool = True
     auto_send: bool = True
+    # Which local Vosk model turns speech into text. The small default misses
+    # the wake name on real voices; the large model hears it but costs a
+    # ~1.9 GB download and several GB of RAM.
+    stt_model: str = DEFAULT_STT_MODEL
     wake: WakeSettings = field(default_factory=WakeSettings)
     response_policy: ResponsePolicySettings = field(default_factory=ResponsePolicySettings)
 
@@ -493,6 +500,9 @@ def settings_from_mapping(data: dict[str, Any]) -> Settings:
     language = str(tts.get("language", "German")).strip() or "German"
     if language not in VALID_TTS_LANGUAGES:
         language = "German"
+    stt_model = str(voice.get("stt_model", DEFAULT_STT_MODEL)).strip() or DEFAULT_STT_MODEL
+    if stt_model not in VALID_STT_MODELS:
+        stt_model = DEFAULT_STT_MODEL
 
     disk = integ.get("disk", {})
     return Settings(
@@ -570,6 +580,7 @@ def settings_from_mapping(data: dict[str, Any]) -> Settings:
         voice=VoiceSettings(
             enabled=bool(voice.get("enabled", True)),
             auto_send=bool(voice.get("auto_send", True)),
+            stt_model=stt_model,
             wake=_parse_wake(voice.get("wake") or {}),
             response_policy=_parse_response_policy(voice.get("response_policy") or {}),
         ),

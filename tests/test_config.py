@@ -41,6 +41,7 @@ def test_defaults_load() -> None:
     assert settings.agents.opencode_binary == "opencode"
     assert settings.agents.plan_first is True
     assert settings.voice.wake.follow_up is True
+    assert settings.voice.stt_model == "vosk-model-small-de-0.15"
     assert settings.voice.response_policy.concise_answers is True
     assert settings.voice.response_policy.open_chat_for_details is True
 
@@ -119,6 +120,17 @@ def test_unknown_autonomy_is_kept_but_never_widens_the_policy() -> None:
     assert settings.tools.autonomy == "yolo"
     # … but the policy refuses to read it as anything permissive.
     assert ToolPolicy(settings.tools.autonomy).autonomy is AutonomyLevel.STRICT
+
+
+def test_unknown_stt_model_falls_back_to_the_default() -> None:
+    data = default_mapping()
+    data["voice"]["stt_model"] = "totally-made-up"
+    settings = settings_from_mapping(data)
+    # Fail closed: an unknown model must never reach the downloader.
+    assert settings.voice.stt_model == "vosk-model-small-de-0.15"
+
+    data["voice"]["stt_model"] = "vosk-model-de-0.21"
+    assert settings_from_mapping(data).voice.stt_model == "vosk-model-de-0.21"
 
 
 def test_wake_word_is_off_by_default() -> None:

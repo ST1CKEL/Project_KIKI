@@ -34,6 +34,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="deutsches Offline-Sprachmodell sicher herunterladen und prüfen",
     )
+    parser.add_argument(
+        "--stt-model",
+        help=(
+            "mit --prepare-voice-model: welches Modell ("
+            "vosk-model-small-de-0.15 oder vosk-model-de-0.21)"
+        ),
+    )
     args, rest = parser.parse_known_args(argv)
     if args.json and not args.doctor:
         parser.error("--json kann nur zusammen mit --doctor verwendet werden")
@@ -43,10 +50,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"kiki {__version__}")
         return 0
     if args.prepare_voice_model:
-        from kiki.voice.stt import ensure_vosk_model
+        from kiki.voice.stt import VOSK_MODEL_ID, ensure_vosk_model
 
         try:
-            path = ensure_vosk_model()
+            path = ensure_vosk_model(args.stt_model or VOSK_MODEL_ID)
         except Exception as exc:
             print(f"voice_model_error={exc}", file=sys.stderr)
             return 1
@@ -111,7 +118,7 @@ def _check(*, strict: bool = False) -> int:
     print(f"tts={settings.tts.base_url}")
     print(f"tts_speaker={settings.tts.speaker}")
     voice_runtime = vosk_runtime_available()
-    voice_model = vosk_model_ready()
+    voice_model = vosk_model_ready(settings.voice.stt_model)
     tts_fallback = system_tts_available()
     print(f"voice_vosk={'ready' if voice_runtime else 'missing'}")
     print(f"voice_model={'ready' if voice_model else 'missing'}")

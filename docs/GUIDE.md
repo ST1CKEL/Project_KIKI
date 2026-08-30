@@ -211,6 +211,7 @@ KIKI kann Bilder und Bildschirmfotos analysieren, um dir bei visuellen Aufgaben,
 - **Push-to-Talk:** Halte das Mikrofon-Symbol im Chat oder die konfigurierte Taste gedrückt, sprich deine Frage und lasse die Taste los.
 - **Weckwort „KIKI“:** In den Einstellungen kann die permanente Weckworterkennung aktiviert werden (standardmäßig deaktiviert zur Ressourcenschonung).
 - **Direkte Rückfragen:** Nach KIKIs Antwort kannst du innerhalb des kurzen Hörfensters direkt weitersprechen. Ohne Spracheingabe endet das Fenster automatisch; deaktivierbar unter **Privatsphäre → Sprache**.
+- **Sprachmodell wählen:** Über `[voice] stt_model` in der Konfiguration (`~/.config/kiki/config.toml`) steht zwischen zwei lokalen Modellen zur Wahl. Das kleine Standardmodell (`vosk-model-small-de-0.15`, ~45 MB) ist sparsam, verhört sich aber auf echten Stimmen häufig beim Namen „Kiki“ — das Weckwort reagiert dann nicht. Das große Modell (`vosk-model-de-0.21`) erkennt Sprache und Weckwort deutlich zuverlässiger, kostet aber einen ~1,9-GB-Download und beim Laden mehrere GB RAM.
 - **Offline-Sicherheit:** Die Spracherkennung läuft zu 100 % lokal über das deutsche Vosk-Modell. Keine Sprachdaten verlassen deinen Rechner.
 
 ### Sprachausgabe (TTS)

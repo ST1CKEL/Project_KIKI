@@ -1030,12 +1030,12 @@ class KikiApplication(Adw.Application):
             return
         self._follow_up.cancel()
         self.stop_speech()
-        if not vosk_model_ready():
+        if not vosk_model_ready(self._settings.voice.stt_model):
             self._voice_busy = True
-            self._toast("Lade deutsches Sprachmodell (~45 MB, einmalig) …")
+            self._toast("Lade deutsches Sprachmodell (einmalig) …")
 
             async def _prep():
-                return await asyncio.to_thread(ensure_vosk_model)
+                return await asyncio.to_thread(ensure_vosk_model, self._settings.voice.stt_model)
 
             self._bridge.submit(_prep(), on_success=lambda _p: self._arm_recorder(), on_error=self._voice_failed)
             return
@@ -1165,7 +1165,7 @@ class KikiApplication(Adw.Application):
 
         async def _arm() -> WakeWordListener:
             # Downloading and loading the model must not block GTK.
-            model_dir = await asyncio.to_thread(ensure_vosk_model)
+            model_dir = await asyncio.to_thread(ensure_vosk_model, self._settings.voice.stt_model)
             listener = WakeWordListener(
                 stream=UtteranceStream(model_dir=model_dir),
                 microphone=MicrophoneStream(),
@@ -1299,7 +1299,11 @@ class KikiApplication(Adw.Application):
         self._machine.set(CharacterState.THINKING, hold_ms=0)
 
         async def _run():
-            return await asyncio.to_thread(transcribe_wav, path)
+            return await asyncio.to_thread(
+                transcribe_wav,
+                path,
+                model_id=self._settings.voice.stt_model,
+            )
 
         # One recording is one spoken event: the id is minted where the event
         # is born and travels with its transcript, so a delivery that fires

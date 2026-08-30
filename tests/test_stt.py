@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import os
@@ -25,20 +26,32 @@ from kiki.voice.stt import (
 )
 
 
-def _model_zip_payload() -> bytes:
+def _spec(model_id: str = VOSK_MODEL_ID) -> stt_module.VoskModel:
+    return stt_module.VOSK_MODELS[model_id]
+
+
+def _patch_spec(monkeypatch: pytest.MonkeyPatch, model_id: str = VOSK_MODEL_ID, **changes):
+    spec = dataclasses.replace(stt_module.VOSK_MODELS[model_id], **changes)
+    monkeypatch.setattr(
+        stt_module, "VOSK_MODELS", {**stt_module.VOSK_MODELS, model_id: spec}
+    )
+    return spec
+
+
+def _model_zip_payload(model_id: str = VOSK_MODEL_ID) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
-        for relative in stt_module._REQUIRED_MODEL_FILES:
+        for relative in _spec(model_id).required_files:
             if relative in stt_module._EMPTY_MODEL_FILES:
                 payload = b""
             else:
                 payload = b"model" if relative == "am/final.mdl" else b"config"
-            archive.writestr(f"{VOSK_MODEL_ID}/{relative}", payload)
+            archive.writestr(f"{model_id}/{relative}", payload)
     return output.getvalue()
 
 
-def _write_model_tree(root: Path) -> None:
-    for relative in stt_module._REQUIRED_MODEL_FILES:
+def _write_model_tree(root: Path, model_id: str = VOSK_MODEL_ID) -> None:
+    for relative in _spec(model_id).required_files:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = b"" if relative in stt_module._EMPTY_MODEL_FILES else b"model"
@@ -175,7 +188,7 @@ def test_model_archive_is_published_atomically(tmp_path: Path) -> None:
     archive_path.write_bytes(_model_zip_payload())
     dest = tmp_path / VOSK_MODEL_ID
 
-    _extract_model_archive(archive_path, dest)
+    _extract_model_archive(archive_path, dest, _spec())
 
     assert (dest / "am/final.mdl").read_bytes() == b"model"
     assert (dest / "conf/model.conf").read_bytes() == b"config"
@@ -189,14 +202,35 @@ def test_model_ready_rejects_partial_or_empty_tree(tmp_path: Path) -> None:
     (model_dir / "conf").mkdir()
     (model_dir / "conf/model.conf").write_bytes(b"config")
 
-    assert not stt_module._model_ready(model_dir)
+    assert not stt_module._model_ready(model_dir, _spec())
 
     _write_model_tree(model_dir)
     assert (model_dir / "ivector/online_cmvn.conf").stat().st_size == 0
-    assert stt_module._model_ready(model_dir)
+    assert stt_module._model_ready(model_dir, _spec())
 
     (model_dir / "graph/Gr.fst").write_bytes(b"")
-    assert not stt_module._model_ready(model_dir)
+    assert not stt_module._model_ready(model_dir, _spec())
+
+
+def test_large_model_requires_hclg_layout(tmp_path: Path) -> None:
+    large = _spec(stt_module.VOSK_MODEL_LARGE)
+    assert "graph/HCLG.fst" in large.required_files
+    assert "graph/Gr.fst" not in large.required_files
+
+    model_dir = tmp_path / "model"
+    _write_model_tree(model_dir, stt_module.VOSK_MODEL_LARGE)
+    assert stt_module._model_ready(model_dir, large)
+
+    # The small model's two-graph layout is not a valid large model.
+    (model_dir / "graph/HCLG.fst").unlink()
+    assert not stt_module._model_ready(model_dir, large)
+
+
+def test_unknown_model_id_fails_closed(tmp_path: Path) -> None:
+    assert stt_module.vosk_model_ready("totally-made-up") is False
+    with pytest.raises(SpeechError, match="Unbekanntes Vosk-Modell"):
+        ensure_vosk_model("totally-made-up")
+    assert not (tmp_path / "data").exists()
 
 
 def test_model_download_requires_pinned_digest(
@@ -204,7 +238,7 @@ def test_model_download_requires_pinned_digest(
 ) -> None:
     payload = _model_zip_payload()
     monkeypatch.setattr(stt_module, "user_data_dir", lambda: tmp_path / "data")
-    monkeypatch.setattr(stt_module, "VOSK_MODEL_SHA256", hashlib.sha256(payload).hexdigest())
+    _patch_spec(monkeypatch, sha256=hashlib.sha256(payload).hexdigest())
     import httpx
 
     monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _FakeClient(payload))
@@ -219,7 +253,7 @@ def test_model_download_rejects_wrong_digest(
 ) -> None:
     payload = _model_zip_payload()
     monkeypatch.setattr(stt_module, "user_data_dir", lambda: tmp_path / "data")
-    monkeypatch.setattr(stt_module, "VOSK_MODEL_SHA256", "0" * 64)
+    _patch_spec(monkeypatch, sha256="0" * 64)
     import httpx
 
     monkeypatch.setattr(httpx, "Client", lambda **_kwargs: _FakeClient(payload))
@@ -243,7 +277,7 @@ def test_model_archive_rejects_unsafe_members(tmp_path: Path, member: str) -> No
     with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr(member, b"bad")
     with pytest.raises(SpeechError):
-        _extract_model_archive(archive_path, tmp_path / VOSK_MODEL_ID)
+        _extract_model_archive(archive_path, tmp_path / VOSK_MODEL_ID, _spec())
     assert not (tmp_path / "escape").exists()
 
 
@@ -257,4 +291,4 @@ def test_model_archive_rejects_excessive_member_count(
         archive.writestr(f"{VOSK_MODEL_ID}/conf/model.conf", b"config")
         archive.writestr(f"{VOSK_MODEL_ID}/extra", b"extra")
     with pytest.raises(SpeechError, match="viele Dateien"):
-        _extract_model_archive(archive_path, tmp_path / VOSK_MODEL_ID)
+        _extract_model_archive(archive_path, tmp_path / VOSK_MODEL_ID, _spec())

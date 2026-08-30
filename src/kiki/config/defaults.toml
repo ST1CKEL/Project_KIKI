@@ -119,6 +119,12 @@ interactive = true
 # Push-to-talk / toggle.
 enabled = true
 auto_send = true
+# Local Vosk model for speech-to-text. The small default is a ~45 MB download
+# with a small footprint, but on real voices it often mishears the wake name
+# ("Kiki" becomes "gekippt" or "elke gilt") and then the wake word never
+# matches. "vosk-model-de-0.21" recognises speech and the wake word far more
+# reliably; it costs a ~1.9 GB download and several GB of RAM while loaded.
+stt_model = "vosk-model-small-de-0.15"
 
 [voice.wake]
 # Always-on listening for "KIKI". Off by default: an open microphone is the
