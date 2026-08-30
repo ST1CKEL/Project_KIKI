@@ -104,6 +104,18 @@ def test_fuzzy_fallback_resolves_misheard_app_names(direct_environment) -> None:
     assert all("Thunderbird" in argv[2] for argv in apps)
 
 
+def test_fuzzy_searches_the_full_index_not_the_capped_list(
+    direct_environment, monkeypatch
+) -> None:
+    import kiki.tools.app_launch_tools as app_tools
+
+    monkeypatch.setattr(app_tools, "_MAX_RESULTS", 1)
+    service, apps, _games = direct_environment
+    result = asyncio.run(service.execute(parse_direct_launch("öffne sander bord")))
+    assert result.ok is True
+    assert "Thunderbird" in result.answer
+
+
 def test_ambiguous_fuzzy_matches_stay_unresolved(direct_environment) -> None:
     service, apps, _games = direct_environment
     # Firefox and Firefox ESR are too similar to pick a clear winner.

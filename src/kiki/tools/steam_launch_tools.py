@@ -133,8 +133,12 @@ class SteamIndex:
             self._rebuild()
         return self._games
 
+    def entries(self) -> list[SteamGame]:
+        """All indexed games, alphabetical. `list` caps this for display."""
+        return sorted(self._current().values(), key=lambda game: game.name.casefold())
+
     def list(self, query: str | None = None) -> list[SteamGame]:
-        games = sorted(self._current().values(), key=lambda game: game.name.casefold())
+        games = self.entries()
         needle = (query or "").strip().casefold()
         if needle:
             games = [

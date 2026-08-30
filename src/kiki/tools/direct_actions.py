@@ -137,7 +137,7 @@ class DirectActionService:
         app = None if request.route is LaunchRoute.STEAM else self._applications.find(request.target)
         if app is None and request.route is LaunchRoute.AUTO:
             fuzzy_id = _best_fuzzy(
-                [(entry.app_id, entry.name) for entry in self._applications.list()],
+                [(entry.app_id, entry.name) for entry in self._applications.entries()],
                 request.target,
             )
             if fuzzy_id is not None:
@@ -151,7 +151,7 @@ class DirectActionService:
         game = self._steam.find(request.target)
         if game is None:
             fuzzy_id = _best_fuzzy(
-                [(game.app_id, game.name) for game in self._steam.list()],
+                [(game.app_id, game.name) for game in self._steam.entries()],
                 request.target,
             )
             if fuzzy_id is not None:

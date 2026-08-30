@@ -97,8 +97,12 @@ class DesktopIndex:
             self._rebuild()
         return self._entries
 
+    def entries(self) -> list[DesktopEntry]:
+        """All indexed entries, alphabetical. `list` caps this for display."""
+        return sorted(self._current().values(), key=lambda e: e.name.lower())
+
     def list(self, query: str | None = None) -> list[DesktopEntry]:
-        entries = sorted(self._current().values(), key=lambda e: e.name.lower())
+        entries = self.entries()
         needle = (query or "").strip().lower()
         if needle:
             entries = [
