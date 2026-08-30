@@ -4,7 +4,7 @@
 
 Name:           kiki
 Version:        0.8.0
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Friendly 2D AI desktop pet for Fedora Linux
 
 License:        MIT
