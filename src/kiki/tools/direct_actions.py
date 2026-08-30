@@ -7,6 +7,7 @@ target, resolves that target against local indexes, and invokes the exact id as
 
 from __future__ import annotations
 
+import difflib
 import re
 import uuid
 from dataclasses import dataclass
@@ -28,6 +29,13 @@ _ARTICLE = re.compile(r"^(?:die|den|das|der)\s+", re.IGNORECASE)
 _MULTI_ACTION = re.compile(
     r"(?:[;?\n\r]|\b(?:und\s+dann|danach|anschließend|anschliessend)\b)", re.IGNORECASE
 )
+_FUZZY_COMPACT = re.compile(r"[\s.\-_]+")
+# Speech recognition mangles foreign app names ("Thunderbird" arrives as
+# "sander bord"). The fallback may only close that gap when one candidate is
+# close to the heard name AND clearly better than every other candidate.
+_FUZZY_MIN_RATIO = 0.6
+_FUZZY_MIN_MARGIN = 0.12
+_FUZZY_MIN_LENGTH = 4
 
 
 class LaunchRoute(StrEnum):
@@ -79,6 +87,35 @@ def parse_direct_launch(text: str) -> DirectLaunchRequest | None:
     return DirectLaunchRequest(target=target, route=route)
 
 
+def _best_fuzzy(candidates: list[tuple[str, str]], target: str) -> str | None:
+    """Return the key of one clearly closest candidate, or None.
+
+    `candidates` are (key, name) pairs. The heard target matches only when its
+    compacted form is similar enough to exactly one candidate name; ties stay
+    unresolved and fall through to the ordinary "not found" answer.
+    """
+    needle = _FUZZY_COMPACT.sub("", target.casefold())
+    if len(needle) < _FUZZY_MIN_LENGTH:
+        return None
+    scored = sorted(
+        (
+            (
+                difflib.SequenceMatcher(
+                    None, needle, _FUZZY_COMPACT.sub("", name.casefold())
+                ).ratio(),
+                key,
+            )
+            for key, name in candidates
+        ),
+        reverse=True,
+    )
+    if not scored or scored[0][0] < _FUZZY_MIN_RATIO:
+        return None
+    if len(scored) > 1 and scored[0][0] - scored[1][0] < _FUZZY_MIN_MARGIN:
+        return None
+    return scored[0][1]
+
+
 class DirectActionService:
     """Resolve and execute a parsed direct command through the shared gateway."""
 
@@ -98,6 +135,13 @@ class DirectActionService:
 
     async def execute(self, request: DirectLaunchRequest) -> DirectActionResult:
         app = None if request.route is LaunchRoute.STEAM else self._applications.find(request.target)
+        if app is None and request.route is LaunchRoute.AUTO:
+            fuzzy_id = _best_fuzzy(
+                [(entry.app_id, entry.name) for entry in self._applications.list()],
+                request.target,
+            )
+            if fuzzy_id is not None:
+                app = self._applications.find(fuzzy_id)
         if app is not None:
             return await self._invoke(
                 "app.open",
@@ -105,6 +149,13 @@ class DirectActionService:
                 success=f"Ich starte {app.name}.",
             )
         game = self._steam.find(request.target)
+        if game is None:
+            fuzzy_id = _best_fuzzy(
+                [(game.app_id, game.name) for game in self._steam.list()],
+                request.target,
+            )
+            if fuzzy_id is not None:
+                game = self._steam.find(fuzzy_id)
         if game is not None:
             return await self._invoke(
                 "steam.launch",

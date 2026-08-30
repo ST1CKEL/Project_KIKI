@@ -12,7 +12,12 @@ import kiki.tools.steam_launch_tools as steam_tools
 from kiki.ai.chat_service import ChatService
 from kiki.runtime.event_bus import EventBus
 from kiki.tools.app_launch_tools import AppLaunchSkill, DesktopIndex
-from kiki.tools.direct_actions import DirectActionService, LaunchRoute, parse_direct_launch
+from kiki.tools.direct_actions import (
+    DirectActionService,
+    LaunchRoute,
+    _best_fuzzy,
+    parse_direct_launch,
+)
 from kiki.tools.gateway import ToolGateway
 from kiki.tools.steam_launch_tools import SteamIndex, SteamLaunchSkill
 
@@ -48,6 +53,8 @@ def direct_environment(tmp_path, tools_env, settings, monkeypatch):
     app_dir = tmp_path / "applications"
     steam_dir = tmp_path / "steamapps"
     _desktop(app_dir, "firefox", "Firefox")
+    _desktop(app_dir, "org.thunderbird.Thunderbird", "Thunderbird")
+    _desktop(app_dir, "firefox-esr", "Firefox ESR")
     _manifest(steam_dir, "1145360", "Hades")
     applications = DesktopIndex([app_dir])
     games = SteamIndex([steam_dir])
@@ -84,6 +91,39 @@ def test_unknown_direct_target_does_not_launch_anything(direct_environment) -> N
     result = asyncio.run(service.execute(parse_direct_launch("Starte NichtVorhanden")))
     assert result.ok is False
     assert apps == [] and games == []
+
+
+def test_fuzzy_fallback_resolves_misheard_app_names(direct_environment) -> None:
+    service, apps, _games = direct_environment
+    for heard in ("öffne sander bord", "starte sander bird", "öffne sonderboard"):
+        result = asyncio.run(service.execute(parse_direct_launch(heard)))
+        assert result.ok is True, heard
+        assert result.tool == "app.open"
+        assert "Thunderbird" in result.answer
+    assert len(apps) == 3
+    assert all("Thunderbird" in argv[2] for argv in apps)
+
+
+def test_ambiguous_fuzzy_matches_stay_unresolved(direct_environment) -> None:
+    service, apps, _games = direct_environment
+    # Firefox and Firefox ESR are too similar to pick a clear winner.
+    result = asyncio.run(service.execute(parse_direct_launch("starte feuerfuchs")))
+    assert result.ok is False
+    assert apps == []
+
+
+def test_fuzzy_matcher_rules() -> None:
+    candidates = [("tb", "Thunderbird"), ("ff", "Firefox")]
+    assert _best_fuzzy(candidates, "sander bord") == "tb"
+    assert _best_fuzzy(candidates, "thunderbird") == "tb"
+    # No candidate is close enough.
+    assert _best_fuzzy(candidates, "maschinenbau") is None
+    # Two near-equal candidates never resolve.
+    assert (
+        _best_fuzzy([("a", "Firefox"), ("b", "Firefox ESR")], "feuerfuchs") is None
+    )
+    # A heard name below four letters stays deterministic-only.
+    assert _best_fuzzy(candidates, "ok") is None
 
 
 def test_direct_chat_bypasses_the_provider_and_keeps_history(
