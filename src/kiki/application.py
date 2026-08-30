@@ -1383,7 +1383,10 @@ class KikiApplication(Adw.Application):
         # indexes by ChatService and executed as Origin.USER. Routing it through
         # chat preserves transcript, audit, TTS and follow-up while ensuring no
         # model gets to reinterpret the authorized target.
-        if self._service is not None and self._service.direct_action(text) is not None:
+        if self._service is not None and (
+            self._service.direct_action(text) is not None
+            or self._service.direct_control(text) is not None
+        ):
             self.open_chat()
             if self._chat is not None:
                 self._chat.submit_transcript(text.strip(), send=True)

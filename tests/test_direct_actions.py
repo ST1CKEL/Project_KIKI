@@ -17,6 +17,7 @@ from kiki.tools.direct_actions import (
     LaunchAction,
     LaunchRoute,
     _best_fuzzy,
+    parse_direct_control,
     parse_direct_launch,
 )
 from kiki.tools.gateway import ToolGateway
@@ -225,3 +226,121 @@ def test_closing_steam_games_is_refused(direct_environment) -> None:
     assert result.ok is False
     assert result.tool == ""
     assert games == []
+
+
+# --- everyday control commands -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("phrase", "tool", "args"),
+    [
+        ("Stell die Lautstärke auf 30 Prozent", "audio.volume_set", {"percent": 30}),
+        ("Lautstärke auf 30", "audio.volume_set", {"percent": 30}),
+        ("Lautstärke auf 300", "audio.volume_set", {"percent": 100}),
+        ("Lautstärke voll", "audio.volume_set", {"percent": 100}),
+        ("Stumm", "audio.mute", {"muted": True}),
+        ("Schalte den Ton aus", "audio.mute", {"muted": True}),
+        ("Ton wieder an", "audio.mute", {"muted": False}),
+        ("Helligkeit auf 60", "display.brightness_set", {"percent": 60}),
+        ("Pausiere die Musik", "media.play_pause", {}),
+        ("Spiel die Musik ab", "media.play_pause", {}),
+        ("Nächstes Lied", "media.next", {}),
+        ("Vorheriger Titel", "media.previous", {}),
+        ("Stop die Wiedergabe", "media.stop", {}),
+        ("Stop", "media.play_pause", {}),
+        ("Sperr den Bildschirm", "session.lock", {}),
+    ],
+)
+def test_control_commands_map_to_declared_tools(phrase, tool, args) -> None:
+    request = parse_direct_control(phrase)
+    assert request is not None, phrase
+    assert request.tool == tool
+    assert request.arguments == args
+    assert request.answer
+
+
+def test_time_and_date_are_answered_locally() -> None:
+    time_request = parse_direct_control("Wie spät ist es?")
+    assert time_request is not None
+    assert time_request.tool == ""
+    assert "Uhr" in time_request.answer
+    date_request = parse_direct_control("Welches Datum haben wir?")
+    assert date_request is not None
+    assert date_request.tool == ""
+    assert "Heute ist" in date_request.answer
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "kannst du die Lautstärke auf 30 stellen",
+        "Wie spät ist es und was gibt es heute zu essen",
+        "Ich frage mich, ob Stumm gut ist",
+        "",
+    ],
+)
+def test_non_commands_stay_out_of_the_control_path(phrase) -> None:
+    assert parse_direct_control(phrase) is None
+
+
+def test_control_commands_dispatch_exact_arguments(tools_env, settings) -> None:
+    from kiki.tools.direct_actions import DirectActionService
+    from kiki.tools.policy import RiskLevel
+    from kiki.tools.registry import ToolSpec
+
+    registry, executor = tools_env
+    calls: list[dict] = []
+
+    def handler(params):
+        calls.append(dict(params))
+        return {"ok": True}
+
+    registry.register(
+        ToolSpec(
+            name="audio.volume_set",
+            title="Lautstärke",
+            description="Setzt die Lautstärke.",
+            risk=RiskLevel.CONTROL,
+            parameters={
+                "type": "object",
+                "properties": {"percent": {"type": "integer"}},
+                "required": ["percent"],
+                "additionalProperties": False,
+            },
+            handler=handler,
+            effect="Setzt die Lautstärke.",
+            auto_allow=True,
+        )
+    )
+    gateway = ToolGateway(
+        executor,
+        panic_check=lambda: settings.app.privacy_panic,
+        integrations_check=settings.integrations_active,
+    )
+    service = DirectActionService(gateway, DesktopIndex([]), SteamIndex([]))
+
+    request = parse_direct_control("Lautstärke auf 30")
+    result = asyncio.run(service.execute_control(request))
+
+    assert result.ok is True
+    assert result.tool == "audio.volume_set"
+    assert calls == [{"percent": 30}]
+
+
+def test_local_answers_never_touch_the_gateway(tools_env, settings) -> None:
+    from kiki.tools.direct_actions import DirectActionService
+
+    registry, executor = tools_env
+    gateway = ToolGateway(
+        executor,
+        panic_check=lambda: settings.app.privacy_panic,
+        integrations_check=settings.integrations_active,
+    )
+    service = DirectActionService(gateway, DesktopIndex([]), SteamIndex([]))
+    request = parse_direct_control("Wie spät ist es?")
+
+    result = asyncio.run(service.execute_control(request))
+
+    assert result.ok is True
+    assert result.tool == ""
+    assert "Uhr" in result.answer

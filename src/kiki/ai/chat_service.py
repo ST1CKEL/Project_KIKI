@@ -29,7 +29,13 @@ from kiki.runtime.event_bus import EventBus
 from kiki.storage.chat_repository import ChatRepository, Conversation
 from kiki.storage.memory_repository import MemoryRepository
 from kiki.storage.secrets import SecretStore
-from kiki.tools.direct_actions import DirectActionService, DirectLaunchRequest
+from kiki.tools.direct_actions import (
+    DirectActionResult,
+    DirectActionService,
+    DirectControlRequest,
+    DirectLaunchRequest,
+    parse_direct_control,
+)
 from kiki.tools.executor import ToolExecutor, ToolResult
 from kiki.tools.exposure import declarations
 from kiki.tools.gateway import ToolGateway
@@ -142,6 +148,12 @@ class ChatService:
             return None
         return self._direct_actions.parse(text)
 
+    def direct_control(self, text: str) -> DirectControlRequest | None:
+        """Return a bounded everyday control command, or None."""
+        if self._direct_actions is None:
+            return None
+        return parse_direct_control(text)
+
     async def send(
         self,
         conversation_id: str,
@@ -169,8 +181,13 @@ class ChatService:
             title = user_text.strip().split("\n", 1)[0][:48] if user_text.strip() else "Bildfrage"
             self._chats.rename_conversation(conversation_id, title or "Chat")
         direct = self.direct_action(user_text) if not images and not status_snapshot else None
+        control = self.direct_control(user_text) if direct is None and not images and not status_snapshot else None
         if direct is not None:
             async for event in self._run_direct(conversation_id, direct):
+                yield event
+            return
+        if control is not None:
+            async for event in self._run_direct_control(conversation_id, control):
                 yield event
             return
         # Size the context to what this turn actually needs. A greeting must
@@ -271,6 +288,36 @@ class ChatService:
             self._bus.emit("chat.stream.done", conversation_id=conversation_id, ok=False)
             yield StreamEvent(kind="error", text=answer)
             return
+        async for event in self._emit_local_answer(conversation_id, result):
+            yield event
+
+    async def _run_direct_control(
+        self,
+        conversation_id: str,
+        request: DirectControlRequest,
+    ) -> AsyncIterator[StreamEvent]:
+        """Execute a bounded everyday control command without a model."""
+        assert self._direct_actions is not None
+        self._bus.emit("chat.stream.start", conversation_id=conversation_id)
+        try:
+            result = await self._direct_actions.execute_control(request)
+        except Exception as exc:
+            log.warning("direct control failed: %s", type(exc).__name__)
+            answer = "Der lokale Befehl ist unerwartet fehlgeschlagen."
+            self._chats.add_message(conversation_id, "assistant", answer)
+            self._bus.emit("chat.stream.error", conversation_id=conversation_id, error=answer)
+            self._bus.emit("chat.stream.done", conversation_id=conversation_id, ok=False)
+            yield StreamEvent(kind="error", text=answer)
+            return
+        async for event in self._emit_local_answer(conversation_id, result):
+            yield event
+
+    async def _emit_local_answer(
+        self,
+        conversation_id: str,
+        result: DirectActionResult,
+    ) -> AsyncIterator[StreamEvent]:
+        """One locally executed command becomes exactly one spoken answer."""
         self._bus.emit("chat.stream.speaking", conversation_id=conversation_id)
         self._bus.emit("chat.stream.delta", conversation_id=conversation_id, text=result.answer)
         yield StreamEvent(kind="delta", text=result.answer)
