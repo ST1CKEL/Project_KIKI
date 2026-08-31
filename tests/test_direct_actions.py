@@ -344,3 +344,21 @@ def test_local_answers_never_touch_the_gateway(tools_env, settings) -> None:
     assert result.ok is True
     assert result.tool == ""
     assert "Uhr" in result.answer
+
+
+def test_postposed_german_word_order_parses() -> None:
+    """„Thunderbird beenden" — the verb-last order Germans actually use."""
+    request = parse_direct_launch("Thunderbird beenden")
+    assert request is not None
+    assert request.action is LaunchAction.CLOSE
+    assert request.target == "Thunderbird"
+
+    request = parse_direct_launch("kiki, den firefox bitte starten")
+    assert request is not None
+    assert request.action is LaunchAction.OPEN
+    assert request.target == "firefox"
+
+
+def test_postposed_verbs_do_not_swallow_questions() -> None:
+    assert parse_direct_launch("wie beende ich thunderbird") is None
+    assert parse_direct_launch("soll ich thunderbird beenden?") is None

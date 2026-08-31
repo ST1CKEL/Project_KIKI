@@ -90,6 +90,16 @@ _CLOSE = frozenset(
         "close",
     }
 )
+# German word order puts the verb last just as often ("Thunderbird beenden",
+# "Firefox öffnen") — the second pattern catches it. Only infinitives live
+# here; conjugated forms ("beendet", "öffnet") read as statements, not commands.
+_POSTPOSED = re.compile(
+    r"^(?:(?:hey\s+)?kiki\s*[,,:]?\s*)?(?:bitte\s+)?"
+    r"(?P<target>.+?)\s+(?:bitte\s+)?"
+    r"(?P<verb>beenden|schließen|schliessen|starten|öffnen)\s*[.!]?$",
+    re.IGNORECASE,
+)
+_POSTPOSED_CLOSE = frozenset({"beenden", "schließen", "schliessen"})
 
 
 def parse_direct_launch(text: str) -> DirectLaunchRequest | None:
@@ -98,11 +108,20 @@ def parse_direct_launch(text: str) -> DirectLaunchRequest | None:
     if not raw or len(raw) > 180:
         return None
     match = _PREFIX.fullmatch(raw)
-    if match is None:
-        return None
-    # lower(), not casefold(): ß folds to "ss" and would miss the verb.
-    action = LaunchAction.CLOSE if match.group("verb").lower() in _CLOSE else LaunchAction.OPEN
-    target = match.group("target").strip()
+    if match is not None:
+        # lower(), not casefold(): ß folds to "ss" and would miss the verb.
+        action = LaunchAction.CLOSE if match.group("verb").lower() in _CLOSE else LaunchAction.OPEN
+        target = match.group("target").strip()
+    else:
+        match = _POSTPOSED.fullmatch(raw)
+        if match is None:
+            return None
+        action = (
+            LaunchAction.CLOSE
+            if match.group("verb").lower() in _POSTPOSED_CLOSE
+            else LaunchAction.OPEN
+        )
+        target = match.group("target").strip()
     steam = _STEAM_SUFFIX.search(target)
     route = LaunchRoute.STEAM if steam is not None else LaunchRoute.AUTO
     if steam is not None:
