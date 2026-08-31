@@ -153,7 +153,7 @@ follow_up = true
 listen_cue = true
 
 [voice.response_policy]
-# For a microphone-started turn KIKI speaks at most two sentences / 300
+# For a microphone-started turn KIKI speaks at most three sentences / 450
 # characters. The complete answer remains unchanged in chat.
 concise_answers = true
 # Bring the chat forward when speech was shortened or privacy-redacted.

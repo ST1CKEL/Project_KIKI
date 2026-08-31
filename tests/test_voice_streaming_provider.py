@@ -1103,7 +1103,7 @@ def test_the_normalised_text_is_what_reaches_the_wire() -> None:
     spoken = speakable(raw)
     # The words around the URL stay; only the address goes. A sentence can end
     # up dangling ("… siehe"), which is the honest cost of not reading URLs out.
-    assert spoken == "Status erledigt und 20 Euro — siehe"
+    assert spoken == "Status erledigt und zwanzig Euro — siehe"
 
     log: list[dict] = []
     provider = StreamingServiceTTSProvider(

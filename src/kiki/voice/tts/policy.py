@@ -63,10 +63,12 @@ _SENTENCE = re.compile(r".+?(?:[.!?…]+(?=\s|$)|$)", re.DOTALL)
 @dataclass(frozen=True)
 class VoicePolicyConfig:
     default_mode: VoiceMode = VoiceMode.CONCISE
-    concise_max_sentences: int = 2
-    concise_max_characters: int = 300
-    normal_max_sentences: int = 3
-    normal_max_characters: int = 500
+    # Concise stays conversational rather than stenographic: three sentences
+    # speak in well under half a minute and keep a spoken dialogue flowing.
+    concise_max_sentences: int = 3
+    concise_max_characters: int = 450
+    normal_max_sentences: int = 5
+    normal_max_characters: int = 800
     detailed_speech: bool = False
     speak_code: bool = False
     speak_logs: bool = False
@@ -97,10 +99,10 @@ class VoicePolicyConfig:
             mode = VoiceMode.CONCISE
         return cls(
             default_mode=mode,
-            concise_max_sentences=count("concise_max_sentences", 2, 20),
-            concise_max_characters=count("concise_max_characters", 300, 4000),
-            normal_max_sentences=count("normal_max_sentences", 3, 40),
-            normal_max_characters=count("normal_max_characters", 500, 8000),
+            concise_max_sentences=count("concise_max_sentences", 3, 20),
+            concise_max_characters=count("concise_max_characters", 450, 4000),
+            normal_max_sentences=count("normal_max_sentences", 5, 40),
+            normal_max_characters=count("normal_max_characters", 800, 8000),
             detailed_speech=flag("detailed_speech", False),
             speak_code=flag("speak_code", False),
             speak_logs=flag("speak_logs", False),

@@ -336,6 +336,9 @@ class WakeWordListener:
         on_command: Callable[[str, bytes], None],
         on_timeout: Callable[[], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
+        on_early: Callable[[bytes], None] | None = None,
+        silence_to_early_ms: float = 650.0,
+        min_speech_ms: float = 350.0,
     ) -> None:
         cleaned = tuple(normalize(p) for p in phrases if normalize(p))
         if not cleaned:
@@ -349,6 +352,18 @@ class WakeWordListener:
         self._on_command = on_command
         self._on_timeout = on_timeout
         self._on_error = on_error
+        # Speculative transcription: fired by an energy-based silence
+        # detector while Vosk is still waiting to close the utterance, so
+        # whisper starts ~0.5-1 s earlier. Calibrated on the ambient noise
+        # heard while WAITING; worst case it never fires (no harm) or the
+        # person keeps talking (the full PCM is re-transcribed instead).
+        self._on_early = on_early
+        self._silence_to_early_ms = max(0.0, silence_to_early_ms)
+        self._min_speech_ms = max(0.0, min_speech_ms)
+        self._noise_floor = 0.0
+        self._speech_ms = 0.0
+        self._silence_ms = 0.0
+        self._early_fired = False
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._paused = threading.Event()
@@ -461,6 +476,7 @@ class WakeWordListener:
                     log.info("wake word detected")
                     self._state = ListenerState.CAPTURING
                     self._capture_deadline = moment + self._command_timeout
+                    self._reset_early_detector()
                     self._on_detect()
             return
         if self._state is ListenerState.CAPTURING:
@@ -487,6 +503,7 @@ class WakeWordListener:
         command = self._strip_wake_prefix(text)
         self._state = ListenerState.CAPTURING
         self._capture_deadline = moment + self._command_timeout
+        self._reset_early_detector()
         self._on_detect()
         if command:
             # One breath: wake word and command in the same utterance. The
@@ -494,6 +511,11 @@ class WakeWordListener:
             self._state = ListenerState.WAITING
             self._cooldown_until = moment + self._cooldown
             self._on_command(command, b"")
+
+    def _reset_early_detector(self) -> None:
+        self._speech_ms = 0.0
+        self._silence_ms = 0.0
+        self._early_fired = False
 
     def _strip_wake_prefix(self, text: str) -> str:
         """Remove the wake phrase (and an optional greeting) from the front."""
@@ -524,8 +546,50 @@ class WakeWordListener:
                         self._capture_pcm.append(chunk)
                     heard = self._stream.feed(chunk)
                     partial = "" if heard is not None else self._stream.partial()
+                self._observe_energy(chunk)
                 self.handle(heard, partial=partial)
         except Exception as exc:  # pragma: no cover - hardware failure path
             log.exception("wake listener crashed")
             if self._on_error is not None:
                 self._on_error(exc)
+
+    def _observe_energy(self, pcm: bytes) -> None:
+        """Feed the speculative-transcription silence detector.
+
+        Speech/silence is judged against an adaptive noise floor learned from
+        the ambient sound heard while waiting for the wake word. The detector
+        deliberately errs quiet: if it never fires, transcription simply
+        starts when Vosk closes the utterance, exactly as before.
+        """
+        on_early = self._on_early
+        if on_early is None or not pcm or len(pcm) < 4:
+            return
+        # int16 mono — the capture format of this very listener.
+        count = len(pcm) // 2
+        total = 0
+        for value in memoryview(pcm).cast("h"):
+            total += value * value
+        rms = (total / count) ** 0.5
+        chunk_ms = count / (SAMPLE_RATE / 1000.0)
+        threshold = max(self._noise_floor * 4.0, 350.0)
+        if rms > threshold:
+            self._speech_ms += chunk_ms
+            self._silence_ms = 0.0
+        else:
+            self._silence_ms += chunk_ms
+            # Track the floor only from silence, and only before speech in
+            # this capture: during a command it would drift toward speech
+            # pauses and mask them.
+            if self._speech_ms == 0.0:
+                self._noise_floor = (self._noise_floor * 0.9) + (rms * 0.1)
+            if (
+                not self._early_fired
+                and self._speech_ms >= self._min_speech_ms
+                and self._silence_ms >= self._silence_to_early_ms
+            ):
+                self._early_fired = True
+                try:
+                    on_early(b"".join(self._capture_pcm))
+                except Exception:
+                    log.debug("early transcription callback failed", exc_info=True)
+

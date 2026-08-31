@@ -19,11 +19,11 @@ from kiki.voice.tts_text import EMOJI_WORDS, SYMBOL_WORDS, flush_buffer, speakab
     ("raw", "spoken"),
     [
         ("Hallo 👋", "Hallo"),
-        ("Das kostet 20 €", "Das kostet 20 Euro"),
+        ("Das kostet 20 €", "Das kostet zwanzig Euro"),
         ("Status ✅", "Status erledigt"),
-        ("Fehler ❌ bei 30 °C", "Fehler fehlgeschlagen bei 30 Grad Celsius"),
-        ("Größe: 3,5 % — läuft!", "Größe: 3,5 Prozent — läuft!"),
-        ("Straße, Grüße — „Anführung“ … 1. Punkt!", "Straße, Grüße — „Anführung“ … 1. Punkt!"),
+        ("Fehler ❌ bei 30 °C", "Fehler fehlgeschlagen bei dreißig Grad Celsius"),
+        ("Größe: 3,5 % — läuft!", "Größe: drei Komma fünf Prozent — läuft!"),
+        ("Straße, Grüße — „Anführung“ … eins. Punkt!", "Straße, Grüße — „Anführung“ … eins. Punkt!"),
     ],
 )
 def test_the_named_regression_cases(raw, spoken) -> None:
@@ -38,8 +38,8 @@ PLAIN_GERMAN = [
     "Die Straße war größer als gedacht.",
     "Übrigens: äöüÄÖÜß bleiben, wie sie sind.",
     "Er sagte „das reicht mir“ — und ging.",
-    "Am 23. August 2026 um 14:30 Uhr.",
-    "Das sind 1.234,56 Einheiten; genauer: 1.234,56.",
+    "Am dreiundzwanzigsten August zweitausendsechsundzwanzig um vierzehn Uhr dreißig.",
+    "Das sind eintausendzweihundertvierunddreißig Komma sechsundfünfzig Einheiten; genauer: eintausendzweihundertvierunddreißig Komma sechsundfünfzig.",
     "Wirklich? Ja! Also gut …",
     "Erst A, dann B – schließlich C.",
 ]
@@ -163,7 +163,7 @@ def test_the_word_tables_are_short_and_german() -> None:
 
 def test_no_space_is_left_in_front_of_punctuation() -> None:
     """A padded replacement must not leave "20 Euro ." — audible as a stumble."""
-    assert speakable("Das kostet 20 €.") == "Das kostet 20 Euro."
+    assert speakable("Das kostet 20 €.") == "Das kostet zwanzig Euro."
     assert speakable("Fertig ✅!") == "Fertig erledigt!"
     assert speakable("Wieviel %?") == "Wieviel Prozent?"
     # German dashes keep the space that belongs to them.
@@ -173,17 +173,17 @@ def test_no_space_is_left_in_front_of_punctuation() -> None:
 @pytest.mark.parametrize(
     ("raw", "spoken"),
     [
-        ("20 €", "20 Euro"),
-        ("€20", "Euro 20"),
-        ("5 $", "5 Dollar"),
-        ("9 £", "9 Pfund"),
-        ("100 %", "100 Prozent"),
-        ("100%", "100 Prozent"),
-        ("30 °C", "30 Grad Celsius"),
-        ("72 °F", "72 Grad Fahrenheit"),
-        ("45 °", "45 Grad"),
+        ("20 €", "zwanzig Euro"),
+        ("€20", "zwanzig Euro"),
+        ("5 $", "fünf Dollar"),
+        ("9 £", "neun Pfund"),
+        ("100 %", "einhundert Prozent"),
+        ("100%", "einhundert Prozent"),
+        ("30 °C", "dreißig Grad Celsius"),
+        ("72 °F", "zweiundsiebzig Grad Fahrenheit"),
+        ("45 °", "fünfundvierzig Grad"),
         ("A & B", "A und B"),
-        ("5 × 3", "5 mal 3"),
+        ("5 × 3", "fünf mal drei"),
     ],
 )
 def test_symbols_become_words(raw, spoken) -> None:
@@ -203,7 +203,7 @@ def test_every_entry_point_applies_the_same_contract() -> None:
     raw = "Status ✅ und 20 €. Danach https://example.com noch was. Rest"
     chunks, rest = split_ready(raw)
 
-    assert chunks == ["Status erledigt und 20 Euro.", "Danach noch was."]
+    assert chunks == ["Status erledigt und zwanzig Euro.", "Danach noch was."]
     assert flush_buffer(rest) == "Rest"
 
 
@@ -217,3 +217,36 @@ def test_the_first_chunk_split_normalises_too() -> None:
 def test_an_utterance_that_normalises_to_nothing_is_not_spoken() -> None:
     assert flush_buffer("🎉🚀😊") == ""
     assert speakable("```nur code```") == ""
+
+
+# --- spoken German numbers, times, abbreviations -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "spoken"),
+    [
+        ("Es ist 14:37.", "Es ist vierzehn Uhr siebenunddreißig."),
+        ("um 7:05 Uhr", "um sieben Uhr fünf"),
+        ("Das sind ca. 5 km.", "Das sind circa fünf Kilometer."),
+        ("z.B. Thunderbird", "zum Beispiel Thunderbird"),
+        ("ggf. Firefox, evtl. auch", "gegebenenfalls Firefox, eventuell auch"),
+        ("usw. und so weiter", "und so weiter und so weiter"),
+        ("Das sind 1.234,56 Einheiten.", "Das sind eintausendzweihundertvierunddreißig Komma sechsundfünfzig Einheiten."),
+        ("3,5 kg", "drei Komma fünf Kilogramm"),
+        ("500 MB Speicher", "fünfhundert Megabyte Speicher"),
+        ("Am 3. Mai", "Am dritten Mai"),
+        ("der 23. August", "der dreiundzwanzigste August"),
+        ("Ich habe 3 Bilder und 12 Dateien.", "Ich habe drei Bilder und zwölf Dateien."),
+        ("Es läuft Version 115.0.", "Es läuft Version 115.0."),
+        ("€20 bleiben", "zwanzig Euro bleiben"),
+        ("8 GB RAM", "acht Gigabyte RAM"),
+    ],
+)
+def test_numbers_times_and_abbreviations_become_spoken_german(raw, spoken) -> None:
+    assert speakable(raw) == spoken
+
+
+def test_abbreviation_stops_do_not_split_sentences() -> None:
+    ready, rest = split_ready("Das sind ca. 5 km. Zweiter Satz.")
+    assert ready == ["Das sind circa fünf Kilometer.", "Zweiter Satz."]
+    assert rest == ""

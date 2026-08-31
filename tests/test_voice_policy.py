@@ -21,23 +21,23 @@ def test_silent_speaks_nothing() -> None:
     assert plan.text == ""
 
 
-def test_concise_stops_after_two_sentences() -> None:
+def test_concise_stops_after_three_sentences() -> None:
     answer = "Erstens. Zweitens. Drittens. Viertens."
     plan = _policy().plan(answer, mode=VoiceMode.CONCISE)
-    assert plan.text == "Erstens. Zweitens."
+    assert plan.text == "Erstens. Zweitens. Drittens."
     assert plan.truncated is True
 
 
-def test_normal_allows_three() -> None:
+def test_normal_allows_five() -> None:
     answer = "Erstens. Zweitens. Drittens. Viertens."
     plan = _policy().plan(answer, mode=VoiceMode.NORMAL)
-    assert plan.text == "Erstens. Zweitens. Drittens."
+    assert plan.text == "Erstens. Zweitens. Drittens. Viertens."
 
 
 def test_detailed_stays_capped_unless_explicitly_enabled() -> None:
     answer = "Eins. Zwei. Drei. Vier. Fünf."
     capped = _policy().plan(answer, mode=VoiceMode.DETAILED)
-    assert capped.text == "Eins. Zwei. Drei."
+    assert capped.text == "Eins. Zwei. Drei. Vier. Fünf."
 
     full = _policy(detailed_speech=True).plan(answer, mode=VoiceMode.DETAILED)
     assert full.text == answer
@@ -188,10 +188,10 @@ def test_markdown_markup_is_stripped_from_speech() -> None:
 def test_defaults_toml_matches_the_documented_policy() -> None:
     config = VoicePolicyConfig.from_mapping(default_mapping()["voice"]["response_policy"])
     assert config.default_mode is VoiceMode.CONCISE
-    assert config.concise_max_sentences == 2
-    assert config.concise_max_characters == 300
-    assert config.normal_max_sentences == 3
-    assert config.normal_max_characters == 500
+    assert config.concise_max_sentences == 3
+    assert config.concise_max_characters == 450
+    assert config.normal_max_sentences == 5
+    assert config.normal_max_characters == 800
     assert config.detailed_speech is False
     for flag in ("speak_code", "speak_logs", "speak_urls", "speak_paths", "speak_tables", "speak_secrets"):
         assert getattr(config, flag) is False, flag
@@ -208,5 +208,5 @@ def test_unreadable_numbers_keep_their_defaults() -> None:
     config = VoicePolicyConfig.from_mapping(
         {"concise_max_sentences": "viele", "normal_max_characters": None}
     )
-    assert config.concise_max_sentences == 2
-    assert config.normal_max_characters == 500
+    assert config.concise_max_sentences == 3
+    assert config.normal_max_characters == 800

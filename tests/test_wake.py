@@ -374,3 +374,76 @@ def test_partial_is_ignored_while_capturing_and_after_timeout() -> None:
     listener.handle(None, now=13.0)
     listener.handle(None, partial="kiki nochmal", now=14.0)
     assert detected == ["wake", "wake"]
+
+
+# --- speculative early transcription ------------------------------------------
+
+
+def _loud_pcm(milliseconds: int, amplitude: int = 8000) -> bytes:
+    import math
+    import struct
+
+    samples = int(16 * milliseconds)  # 16 kHz
+    return b"".join(
+        struct.pack("<h", int(amplitude * math.sin(i / 8)))
+        for i in range(samples)
+    )
+
+
+def _silent_pcm(milliseconds: int, amplitude: int = 40) -> bytes:
+    import math
+    import struct
+
+    samples = int(16 * milliseconds)
+    return b"".join(
+        struct.pack("<h", int(amplitude * math.sin(i / 8)))
+        for i in range(samples)
+    )
+
+
+def test_silence_after_speech_fires_early_once() -> None:
+    early: list[bytes] = []
+    stream = FakeStream([])
+    listener = WakeWordListener(
+        stream=stream,
+        microphone=ScriptedMicrophone([]),
+        on_detect=lambda: None,
+        on_command=lambda _t, _p: None,
+        on_early=early.append,
+        silence_to_early_ms=200,
+        min_speech_ms=100,
+    )
+    listener.handle("kiki", now=0.0)
+
+    # Ambient noise calibrates the floor while waiting; then a command.
+    for chunk in (_silent_pcm(200),):
+        listener._observe_energy(chunk)
+    listener.handle(None, partial="hey kiki", now=0.2)
+    listener._reset_early_detector()  # entering CAPTURING via the partial path
+
+    listener._observe_energy(_loud_pcm(150))
+    assert early == []
+    listener._observe_energy(_silent_pcm(150))
+    listener._observe_energy(_silent_pcm(150))
+    assert len(early) == 1
+
+    # Fires exactly once per capture, even in further silence.
+    listener._observe_energy(_silent_pcm(300))
+    assert len(early) == 1
+
+
+def test_early_never_fires_without_speech() -> None:
+    early: list[bytes] = []
+    listener = WakeWordListener(
+        stream=FakeStream([]),
+        microphone=ScriptedMicrophone([]),
+        on_detect=lambda: None,
+        on_command=lambda _t, _p: None,
+        on_early=early.append,
+        silence_to_early_ms=100,
+        min_speech_ms=100,
+    )
+    listener._reset_early_detector()
+    for _ in range(6):
+        listener._observe_energy(_silent_pcm(200))
+    assert early == []

@@ -11,14 +11,14 @@ def _policy(**overrides) -> VoiceResponsePolicy:
 
 
 def test_long_answer_is_shortened_once_as_a_whole() -> None:
-    answer = "Erstens. Zweitens. Drittens. Viertens."
+    answer = "Erstens. Zweitens. Drittens. Viertens. Fünftens. Sechstens."
 
     delivery = plan_voice_answer(answer, policy=_policy())
 
     assert delivery.truncated
     assert delivery.open_chat
-    assert delivery.spoken_text == f"Erstens. Zweitens. {CHAT_NOTICE}"
-    assert answer == "Erstens. Zweitens. Drittens. Viertens."
+    assert delivery.spoken_text == f"Erstens. Zweitens. Drittens. {CHAT_NOTICE}"
+    assert answer == "Erstens. Zweitens. Drittens. Viertens. Fünftens. Sechstens."
 
 
 def test_short_plain_answer_does_not_open_chat() -> None:
@@ -58,7 +58,7 @@ def test_disabling_concise_mode_keeps_all_safe_prose() -> None:
 
 
 def test_chat_auto_open_can_be_disabled_without_restoring_omitted_speech() -> None:
-    answer = "Erstens. Zweitens. Drittens."
+    answer = "Erstens. Zweitens. Drittens. Viertens."
 
     delivery = plan_voice_answer(
         answer,
@@ -66,7 +66,7 @@ def test_chat_auto_open_can_be_disabled_without_restoring_omitted_speech() -> No
         open_chat_for_details=False,
     )
 
-    assert delivery.spoken_text == "Erstens. Zweitens."
+    assert delivery.spoken_text == "Erstens. Zweitens. Drittens."
     assert delivery.truncated
     assert not delivery.open_chat
     assert CHAT_NOTICE not in delivery.spoken_text

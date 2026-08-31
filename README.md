@@ -278,7 +278,7 @@ kiki-setup-model
 Für lebendige, natürlich klingende deutsche Sprachausgabe nutzt KIKI einen separaten **Qwen3-TTS 0.6B Microservice** (`CustomVoice Serena`):
 
 Bei einer per Mikrofon gestellten Frage spricht KIKI standardmäßig höchstens
-zwei Sätze beziehungsweise 300 Zeichen. Wurde die Antwort gekürzt oder wurden
+drei Sätze beziehungsweise 450 Zeichen, satzweise gestreamt. Wurde gekürzt oder wurden
 sensible/technische Inhalte nicht vorgelesen, öffnet KIKI automatisch den Chat
 mit dem unveränderten vollständigen Text. Beide Verhaltensweisen sind in den
 Spracheinstellungen abschaltbar.

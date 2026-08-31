@@ -214,8 +214,8 @@ def test_a_long_answer_survives_the_whole_way(tmp_path) -> None:
         director.feed(f"Das ist Satz Nummer {n}. ")
     director.flush()
     spoken = " ".join(_queued(director))
-    assert "Satz Nummer 1." in spoken
-    assert "Satz Nummer 20." in spoken
+    assert "Satz Nummer eins." in spoken
+    assert "Satz Nummer zwanzig." in spoken
 
 
 def test_the_director_stays_thread_safe(tmp_path) -> None:

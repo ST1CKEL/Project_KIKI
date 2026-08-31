@@ -80,11 +80,13 @@ from kiki.ui.preferences_window import PreferencesWindow
 from kiki.ui.run_bar_model import text_for as run_status_text
 from kiki.ui.workspace_manager_window import WorkspaceManagerWindow
 from kiki.voice.answer import VoiceAnswerDelivery, plan_voice_answer
+from kiki.voice.budget import StreamingVoiceBudget
 from kiki.voice.cue import play_cue
 from kiki.voice.director import SpeechDirector
 from kiki.voice.follow_up import FollowUpTurn
 from kiki.voice.recorder import AudioRecorder, RecorderError
 from kiki.voice.stt import SpeechError, ensure_vosk_model, vosk_model_ready
+from kiki.voice.stt_client import pcm16_to_wav, transcribe_wav_remote
 from kiki.voice.system_tts import synthesize_system_wav
 from kiki.voice.transcription import SpokenTranscriber
 from kiki.voice.tts.policy import VoicePolicyConfig, VoiceResponsePolicy
@@ -104,6 +106,11 @@ from kiki.watch.watchers import BatteryWatcher, DiskWatcher
 from kiki.workspaces.registry import WorkspaceRegistry
 
 log = logging.getLogger(__name__)
+
+
+# A finished utterance is accepted as "the same passage" when Vosk waited at
+# most this much longer than the silence detector (trailing silence, ~0.6 s).
+_EARLY_PCM_TOLERANCE_BYTES = 16000 * 2 * 6 // 10
 
 
 class KikiApplication(Adw.Application):
@@ -146,6 +153,14 @@ class KikiApplication(Adw.Application):
         self._tts_remote_retry_after = 0.0
         self._tts_remote_error = ""
         self._transcriber = SpokenTranscriber(self._settings)
+        # The persistent voice conversation: spoken turns share history and
+        # memories exactly like a typed one, without ever opening a window.
+        self._voice_conversation_id: str | None = None
+        self._voice_stream_active = False
+        self._voice_budget: StreamingVoiceBudget | None = None
+        # Speculative whisper start: fired by the wake listener's silence
+        # detector before Vosk finalizes the utterance.
+        self._voice_early: dict[str, object] = {}
         self._session_service: SessionService | None = None
         self._coding: CodingSessionWindow | None = None
         self._ws_manager: WorkspaceManagerWindow | None = None
@@ -1181,6 +1196,7 @@ class KikiApplication(Adw.Application):
                 ),
                 on_timeout=lambda: GLib.idle_add(self._on_wake_timeout),
                 on_error=lambda exc: GLib.idle_add(self._on_wake_error, exc),
+                on_early=lambda pcm: GLib.idle_add(self._on_wake_early, pcm),
             )
             await asyncio.to_thread(listener.start)
             return listener
@@ -1251,6 +1267,52 @@ class KikiApplication(Adw.Application):
             self._follow_up.cancel()
         return False
 
+    def _on_wake_early(self, pcm: bytes) -> bool:
+        """The silence detector fired before Vosk closed the utterance.
+
+        Start whisper now; if the person really stopped talking, the result
+        is ready when the command arrives and almost a second of waiting
+        disappears. If they kept talking, the full passage re-transcribes.
+        """
+        if not pcm:
+            return False
+        early = self._voice_early
+        if early and not early.get("done"):
+            return False  # one speculative flight per capture
+
+        async def _run():
+            return await transcribe_wav_remote(
+                self._settings.voice.stt_service, pcm16_to_wav(pcm)
+            )
+
+        def _ready(result: object) -> None:
+            entry = self._voice_early
+            entry["done"] = True
+            if isinstance(result, str):
+                entry["text"] = result
+            waiting = entry.get("vosk")
+            if waiting is not None:
+                self._voice_early = {}
+                self._finish_wake_transcript(
+                    result if isinstance(result, str) and result.strip() else waiting[0],
+                    correlation_id=waiting[1],
+                )
+
+        def _failed(_exc: BaseException) -> None:
+            entry = self._voice_early
+            entry["done"] = True
+            waiting = entry.get("vosk")
+            if waiting is not None:
+                self._voice_early = {}
+                self._finish_wake_transcript(waiting[0], correlation_id=waiting[1])
+
+        self._voice_early = {"pcm": pcm, "done": False}
+        try:
+            self._bridge.submit(_run(), on_success=_ready, on_error=_failed)
+        except Exception:
+            self._voice_early = {}
+        return False
+
     def _begin_wake_transcription(
         self, text: str, pcm: bytes, *, correlation_id: str
     ) -> bool:
@@ -1258,7 +1320,26 @@ class KikiApplication(Adw.Application):
 
         The transcriber answers with the better text when the service is up
         and with the Vosk text when it is not — routing always continues.
+        A speculative transcription that already covered this exact passage
+        is reused instead of re-sent.
         """
+        early = self._voice_early
+        if early and early.get("done") and early.get("text"):
+            early_pcm = early.get("pcm")
+            grew = len(pcm) - len(early_pcm) if isinstance(early_pcm, bytes) else 1 << 30
+            if 0 <= grew <= _EARLY_PCM_TOLERANCE_BYTES:
+                final = str(early["text"]).strip() or text
+                self._voice_early = {}
+                self._finish_wake_transcript(final, correlation_id=correlation_id)
+                return True
+        if early and not early.get("done"):
+            # Still in flight: let its completion deliver this turn.
+            early_pcm = early.get("pcm")
+            grew = len(pcm) - len(early_pcm) if isinstance(early_pcm, bytes) else 1 << 30
+            if 0 <= grew <= _EARLY_PCM_TOLERANCE_BYTES:
+                early["vosk"] = (text, correlation_id)
+                return True
+        self._voice_early = {}
 
         async def _run():
             return await self._transcriber.from_pcm(text, pcm)
@@ -1271,6 +1352,9 @@ class KikiApplication(Adw.Application):
             on_error=self._voice_failed,
         )
         return True
+
+    def _finish_wake_transcript(self, text: str, *, correlation_id: str) -> None:
+        self._on_wake_transcript(text, correlation_id=correlation_id)
 
     def _on_wake_transcript(self, text: str, *, correlation_id: str) -> None:
         if not self._route_spoken_text(text, correlation_id=correlation_id):
@@ -1379,39 +1463,50 @@ class KikiApplication(Adw.Application):
             self._toast("KIKI macht gerade Pause.")
             self._say_paused()
             return False
-        # An exact local start command is resolved against the local app/Steam
-        # indexes by ChatService and executed as Origin.USER. Routing it through
-        # chat preserves transcript, audit, TTS and follow-up while ensuring no
-        # model gets to reinterpret the authorized target.
-        if self._service is not None and (
-            self._service.direct_action(text) is not None
-            or self._service.direct_control(text) is not None
-        ):
-            self.open_chat()
-            if self._chat is not None:
-                self._chat.submit_transcript(text.strip(), send=True)
-                return True
+        # Every spoken turn — direct command, conversation, tool task —
+        # travels through ChatService on one persistent voice conversation.
+        # That gives spoken dialogue real memory (history, memories), tools
+        # with confirmations, transcript and audit, without ever opening a
+        # window: the chat stays a silent archive for this voice-first pet.
+        # Direct commands are resolved and executed as Origin.USER inside
+        # ChatService before any model could reinterpret the authorized target.
+        if self._service is None:
+            self._toast("Kein Sprachdienst verfügbar.")
             return False
-        service = self._harness or self._build_harness()
-        if service is None:
-            # No run service (no tool-capable provider): the chat still
-            # answers, voice does not die with the agent path.
-            self.open_chat()
-            if self._chat is not None:
-                self._chat.submit_transcript(text.strip(), send=True)
-                return True
-            return False
-        if service.busy:
+        if self._voice_stream_active:
             self._toast("KIKI arbeitet noch an der letzten Aufgabe.")
             return False
-        coro = service.ask(text.strip(), correlation_id=correlation_id)
-        try:
-            self._bridge.submit(coro, on_error=self._on_voice_run_error)
-        except Exception as exc:
-            coro.close()
-            self._on_voice_run_error(exc)
-            return False
+        self._send_voice_chat(text.strip())
         return True
+
+    def _send_voice_chat(self, text: str) -> None:
+        """Run one spoken turn through ChatService; bus events do the rest."""
+        assert self._service is not None
+        conversation = self._service.ensure_conversation(self._voice_conversation_id)
+        self._voice_conversation_id = conversation.id
+        conv_id = conversation.id
+        self._voice_stream_active = True
+
+        async def _run():
+            async for _event in self._service.send(conv_id, text):
+                # The chat.stream.* bus events drive speech, animation and
+                # follow-up; consuming here keeps the run alive and observed.
+                pass
+
+        def _settled(ok: bool) -> None:
+            self._voice_stream_active = False
+            if not ok:
+                self._follow_up.cancel()
+
+        try:
+            self._bridge.submit(
+                _run(),
+                on_success=lambda _r: _settled(True),
+                on_error=self._on_voice_run_error,
+            )
+        except Exception as exc:
+            _settled(False)
+            self._on_voice_run_error(exc)
 
     def _on_voice_run_error(self, exc: BaseException) -> None:
         from kiki.assistant import DuplicateCorrelationError, RunPausedError
@@ -1444,26 +1539,37 @@ class KikiApplication(Adw.Application):
 
     def _on_stream_start(self, **_payload: object) -> None:
         self.stop_speech()
-        if (
-            not self._follow_up.active
-            and self._settings.tts_allowed()
-            and self._speech is not None
-        ):
+        if self._settings.tts_allowed() and self._speech is not None:
+            # Voice turns stream too: the answer's sentences are spoken while
+            # the model still writes them, under an incremental budget.
+            if self._follow_up.active:
+                max_sentences, max_chars = self._voice_limits()
+                self._voice_budget = StreamingVoiceBudget(
+                    max_sentences=max_sentences, max_characters=max_chars
+                )
             self._speech.begin()
         self._machine.set(CharacterState.THINKING, hold_ms=0)
 
+    def _voice_limits(self) -> tuple[int, int]:
+        from kiki.voice.tts.policy import VoiceMode
+
+        return self._voice_policy().config.limits_for(VoiceMode.CONCISE)
+
     def _on_stream_delta(self, **payload: object) -> None:
-        if self._follow_up.active:
-            # A microphone-started answer is planned once as a whole at done;
-            # speaking deltas here would bypass its global sentence budget.
-            return
         if not self._settings.tts_allowed() or self._speech is None:
             return
         if not self._settings.tts.stream_sentences:
             return
         text = payload.get("text")
-        if isinstance(text, str) and text:
-            self._speech.feed(text)
+        if not isinstance(text, str) or not text:
+            return
+        if self._follow_up.active and self._voice_budget is not None:
+            # The budget releases whole sentences (a clause for the first)
+            # while the answer streams; the rest stays in the chat transcript.
+            text = self._voice_budget.push(text)
+            if not text:
+                return
+        self._speech.feed(text)
 
     def _on_stream_tool(self, **_payload: object) -> None:
         # Working on a tool is thinking, not talking — keep the figure in step.
@@ -1484,11 +1590,22 @@ class KikiApplication(Adw.Application):
         self._follow_up.mark_terminal()
         text = payload.get("text")
         if self._settings.tts_allowed() and self._speech is not None:
+            if voice_turn and self._settings.tts.stream_sentences:
+                # Sentences were already spoken under the streaming budget;
+                # release the last one that ended exactly with the stream.
+                if self._voice_budget is not None:
+                    last = self._voice_budget.final_flush()
+                    if last:
+                        self._speech.feed(last)
+                self._speech.flush()
+                delivered = self._follow_up.mark_response_delivered()
+                if delivered and not self._speech.active:
+                    self._try_arm_follow_up()
+                return
             if voice_turn:
+                # Sentence streaming disabled: plan the complete answer once.
                 answer = text if isinstance(text, str) else ""
                 delivery = self._plan_voice_answer(answer)
-                if delivery.open_chat:
-                    self.open_chat()
                 self._speech.say(delivery.spoken_text)
                 delivered = self._follow_up.mark_response_delivered()
                 if delivered and not self._speech.active:

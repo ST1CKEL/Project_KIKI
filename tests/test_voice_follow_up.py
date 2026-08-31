@@ -65,6 +65,11 @@ class _AppStub:
     _try_arm_follow_up = KikiApplication._try_arm_follow_up
     _voice_policy = KikiApplication._voice_policy
 
+    _on_stream_start = KikiApplication._on_stream_start
+    _on_stream_delta = KikiApplication._on_stream_delta
+    _on_stream_done = KikiApplication._on_stream_done
+    _voice_limits = KikiApplication._voice_limits
+
     def __init__(self, *, follow_up: bool = True) -> None:
         self._settings = Settings()
         self._settings.voice.wake.enabled = True
@@ -77,6 +82,10 @@ class _AppStub:
         self.resumes = 0
         self.opened = 0
         self.toasts: list[str] = []
+        self._voice_budget = None
+
+    def stop_speech(self) -> None:
+        return None
 
     def _resume_wake(self) -> None:
         self.resumes += 1
@@ -174,14 +183,18 @@ def test_chat_completion_without_tts_does_not_open_a_silent_follow_up() -> None:
 
 
 def test_streamed_voice_answer_is_planned_once_and_full_text_stays_in_chat() -> None:
-    from kiki.application import KikiApplication
-    from kiki.voice.answer import CHAT_NOTICE
 
     class Speech:
         def __init__(self) -> None:
             self.active = False
             self.fed: list[str] = []
             self.spoken: list[str] = []
+
+        def begin(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
 
         def feed(self, text: str) -> None:
             self.fed.append(text)
@@ -190,17 +203,24 @@ def test_streamed_voice_answer_is_planned_once_and_full_text_stays_in_chat() -> 
             self.spoken.append(text)
             self.active = True
 
+        def flush(self) -> None:
+            return None
+
     stub = _AppStub()
     stub._speech = Speech()
     stub._follow_up.begin(enabled=True)
     full = "Erstens. Zweitens. Drittens. Viertens."
 
-    KikiApplication._on_stream_delta(stub, text=full)
-    KikiApplication._on_stream_done(stub, ok=True, text=full)
+    # The turn opens the stream (arming the budget), deltas flow into speech
+    # under the incremental sentence budget, and the remainder stays in chat.
+    stub._on_stream_start()
+    stub._on_stream_delta(text=full)
+    stub._on_stream_done(ok=True, text=full)
 
-    assert stub._speech.fed == []
-    assert stub._speech.spoken == [f"Erstens. Zweitens. {CHAT_NOTICE}"]
-    assert stub.opened == 1
+    assert stub._speech.fed == ["Erstens. Zweitens. Drittens."]
+    assert stub._speech.spoken == []
+    # A streaming voice turn never pulls the chat window to the front.
+    assert stub.opened == 0
     # The application never mutates the event payload containing the full text.
     assert full == "Erstens. Zweitens. Drittens. Viertens."
 
