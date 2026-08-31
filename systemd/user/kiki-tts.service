@@ -1,0 +1,19 @@
+[Unit]
+Description=KIKI neural TTS (persistent PipeWire stream)
+PartOf=graphical-session.target
+After=pipewire.service wireplumber.service graphical-session.target
+Wants=pipewire.service
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/kiki/voice.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+ExecStart=/usr/bin/env python3 -m kiki.tts.service
+Restart=always
+RestartSec=3
+TimeoutStartSec=90
+TimeoutStopSec=15
+
+[Install]
+WantedBy=graphical-session.target

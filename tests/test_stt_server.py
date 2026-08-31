@@ -105,3 +105,25 @@ def test_server_refuses_non_loopback() -> None:
     mod = _load_server()
     with pytest.raises(SystemExit):
         mod._bind_host("0.0.0.0")
+
+
+# --- engine selection ----------------------------------------------------------
+
+
+def test_qwen_language_mapping() -> None:
+    mod = _load_server()
+    assert mod._qwen_language("de") == "German"
+    assert mod._qwen_language("DE") == "German"
+    assert mod._qwen_language("en") == "English"
+    assert mod._qwen_language("auto") is None
+    assert mod._qwen_language("") is None
+    # Unbekannte Codes werden als Name durchgereicht (Title-Case).
+    assert mod._qwen_language("Klingon") == "Klingon"
+
+
+def test_engine_defaults_and_choice() -> None:
+    mod = _load_server()
+    args = mod.parse_args([])
+    assert args.engine == "auto"
+    args = mod.parse_args(["--engine", "qwen"])
+    assert args.engine == "qwen"

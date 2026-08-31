@@ -1,0 +1,17 @@
+[Unit]
+Description=KIKI voice orchestrator (state, tools, telemetry)
+PartOf=graphical-session.target
+After=kiki-audio.service kiki-stt.service kiki-tts.service
+Wants=kiki-audio.service kiki-stt.service kiki-tts.service
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/kiki/voice.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m kiki.orchestrator.service
+Restart=always
+RestartSec=2
+TimeoutStartSec=20
+
+[Install]
+WantedBy=graphical-session.target

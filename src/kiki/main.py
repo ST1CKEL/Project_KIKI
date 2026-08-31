@@ -42,14 +42,23 @@ def main(argv: list[str] | None = None) -> int:
             "vosk-model-small-de-0.15 oder vosk-model-de-0.21)"
         ),
     )
+    parser.add_argument(
+        "--voice-doctor",
+        action="store_true",
+        help="Voice-First-Stack (Sockets, Units, GPU, Wake-Modell) ehrlich prüfen",
+    )
     args, rest = parser.parse_known_args(argv)
-    if args.json and not args.doctor:
-        parser.error("--json kann nur zusammen mit --doctor verwendet werden")
+    if args.json and not args.doctor and not args.voice_doctor:
+        parser.error("--json kann nur zusammen mit --doctor oder --voice-doctor verwendet werden")
     if args.version:
         from kiki import __version__
 
         print(f"kiki {__version__}")
         return 0
+    if args.voice_doctor:
+        from kiki.doctor import run_diagnostics
+
+        return run_diagnostics(as_json=args.json)
     if args.prepare_voice_model:
         from kiki.voice.stt import VOSK_MODEL_ID, ensure_vosk_model
 

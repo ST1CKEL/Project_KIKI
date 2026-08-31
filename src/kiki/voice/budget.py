@@ -17,7 +17,7 @@ from kiki.voice.tts_text import ends_with_abbreviation
 _SENTENCE_PUNCT = ".!?…"
 # The first fed chunk may end at a clause once this many characters exist, so
 # the first words leave the gate while the sentence is still being generated.
-FIRST_CLAUSE_MIN_CHARS = 24
+FIRST_CLAUSE_MIN_CHARS = 12
 
 
 def _word_before(text: str, pos: int) -> str:

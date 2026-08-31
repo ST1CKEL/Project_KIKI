@@ -337,8 +337,8 @@ class WakeWordListener:
         on_timeout: Callable[[], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         on_early: Callable[[bytes], None] | None = None,
-        silence_to_early_ms: float = 650.0,
-        min_speech_ms: float = 350.0,
+        silence_to_early_ms: float = 400.0,
+        min_speech_ms: float = 300.0,
     ) -> None:
         cleaned = tuple(normalize(p) for p in phrases if normalize(p))
         if not cleaned:

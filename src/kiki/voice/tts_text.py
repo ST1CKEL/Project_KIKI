@@ -274,10 +274,8 @@ def _spoken_number_text(raw: str) -> str:
 
 MIN_SPEAK_CHARS = 2
 # Below this a clause is not worth its own synthesis request; above it, cutting
-# early pays off. Synthesis runs at about 1.24x realtime on the reference GPU,
-# so the wait before KIKI starts speaking is roughly the first chunk's length —
-# halving that chunk halves the silence at the start of every answer.
-FIRST_CHUNK_MIN_CHARS = 24
+# early pays off. With Kokoro fast synthesis, starting on the first few words cuts latency.
+FIRST_CHUNK_MIN_CHARS = 12
 
 
 def speakable(text: str) -> str:

@@ -184,7 +184,7 @@ prefetch_chunks = 1
 cancel_pending_on_interrupt = true
 
 [tts]
-# Local Qwen3-TTS service (GPU). The GTK process never loads PyTorch.
+# Local Kokoro / Qwen3-TTS service (GPU). The GTK process never loads PyTorch.
 enabled = true
 base_url = "http://127.0.0.1:18765"
 # 0.6B CustomVoice. Serena = warm, gentle young female (best KIKI match).

@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/kiki/stt"
 VENV="${XDG_DATA_HOME:-$HOME/.local/share}/kiki/stt-venv"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-MODEL="${KIKI_STT_MODEL:-Systran/faster-whisper-small}"
+MODEL="${KIKI_STT_MODEL:-Systran/faster-whisper-large-v3-turbo}"
 LANGUAGE="${KIKI_STT_LANGUAGE:-de}"
 DUMMY=0
 
@@ -74,8 +74,8 @@ if [[ "$DUMMY" -eq 0 ]]; then
   fi
   PYTHON_EXEC="$VENV/bin/python"
   "$PYTHON_EXEC" -m pip install -U pip wheel
-  echo "Installiere faster-whisper (ctranslate2) …"
-  "$PYTHON_EXEC" -m pip install -U faster-whisper
+  echo "Installiere faster-whisper (ctranslate2) und qwen-asr …"
+  "$PYTHON_EXEC" -m pip install -U faster-whisper qwen-asr
   if [[ "$GPU" -eq 1 ]]; then
     "$PYTHON_EXEC" -m pip install -U nvidia-cublas-cu12 nvidia-cudnn-cu12
   fi

@@ -54,6 +54,82 @@ class DummyTranscriber:
         return "dies ist ein test des spracherkennungsdienstes"
 
 
+# qwen-asr expects full language names; the unit and config say "de".
+_QWEN_LANGUAGES = {
+    "de": "German", "en": "English", "zh": "Chinese", "yue": "Cantonese",
+    "ar": "Arabic", "fr": "French", "es": "Spanish", "pt": "Portuguese",
+    "id": "Indonesian", "it": "Italian", "ko": "Korean", "ru": "Russian",
+    "th": "Thai", "vi": "Vietnamese", "ja": "Japanese", "tr": "Turkish",
+    "hi": "Hindi", "ms": "Malay", "nl": "Dutch", "sv": "Swedish",
+    "da": "Danish", "fi": "Finnish", "pl": "Polish", "cs": "Czech",
+    "fil": "Filipino", "fa": "Persian", "el": "Greek", "ro": "Romanian",
+    "hu": "Hungarian", "mk": "Macedonian",
+}
+
+
+def _qwen_language(language: str) -> str | None:
+    """ISO code or English name as qwen-asr expects it; None lets it guess."""
+    code = language.strip().lower()
+    if code in {"", "auto"}:
+        return None
+    return _QWEN_LANGUAGES.get(code, code.title())
+
+
+class QwenAsrTranscriber:
+    """Qwen3-ASR (qwen-asr package) as the ear — same contract as Whisper."""
+
+    dummy = False
+    ready = False
+
+    def __init__(self, model_id: str, device: str, language: str) -> None:
+        import numpy
+        import torch
+
+        # The audio tower's conv2d trips over the ctranslate2 cuDNN stack in
+        # the shared venv; the generic kernels are plenty for 0.6B.
+        torch.backends.cudnn.enabled = False
+        from qwen_asr import Qwen3ASRModel
+
+        if device == "auto":
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        dtype = torch.bfloat16 if str(device).startswith("cuda") else torch.float32
+        self.model_id = model_id
+        self.device = str(device)
+        self._numpy = numpy
+        self._language = _qwen_language(language)
+        self._model = Qwen3ASRModel.from_pretrained(
+            model_id, dtype=dtype, device_map=device, max_new_tokens=256
+        )
+        self._lock = threading.Lock()
+        self.ready = True
+
+    def transcribe(self, wav_bytes: bytes) -> str:
+        numpy = self._numpy
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
+            channels = wav.getnchannels()
+            width = wav.getsampwidth()
+            rate = wav.getframerate()
+            frames = wav.getnframes()
+            if width != 2 or wav.getcomptype() != "NONE":
+                raise SttError("Erwartet wird PCM16-WAV.", status=400)
+            seconds = frames / float(rate)
+            if seconds > MAX_AUDIO_SECONDS:
+                raise SttError(
+                    f"Audio länger als {MAX_AUDIO_SECONDS} Sekunden.", status=413
+                )
+            raw = wav.readframes(frames)
+        if channels == 2:
+            mono = numpy.frombuffer(raw, dtype=numpy.int16).reshape(-1, 2).mean(axis=1)
+        else:
+            mono = numpy.frombuffer(raw, dtype=numpy.int16)
+        audio = mono.astype(numpy.float32) / 32768.0
+        with self._lock:
+            results = self._model.transcribe(
+                audio=(audio, rate), language=self._language
+            )
+        return str(results[0].text).strip() if results else ""
+
+
 class WhisperTranscriber:
     dummy = False
     ready = False
@@ -224,6 +300,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--engine",
+        choices=("auto", "whisper", "qwen"),
+        default="auto",
+        help="Erkennungs-Engine; auto erkennt am Modellnamen (Qwen/Qwen3-ASR*)",
+    )
     parser.add_argument("--language", default=DEFAULT_LANGUAGE, help="de, auto, …")
     parser.add_argument("--device", default="auto", help="cuda, cpu, or auto")
     parser.add_argument("--dummy", action="store_true", help="no model: fixed text")
@@ -242,10 +324,15 @@ def main(argv: list[str] | None = None) -> int:
         engine: Any = DummyTranscriber()
         log.info("dummy transcriber (no model)")
     else:
+        engine_cls = (
+            QwenAsrTranscriber
+            if args.model.lower().startswith("qwen/qwen3-asr") or args.engine == "qwen"
+            else WhisperTranscriber
+        )
         try:
-            engine = WhisperTranscriber(args.model, args.device, args.language)
+            engine = engine_cls(args.model, args.device, args.language)
         except ImportError as exc:
-            log.error("faster-whisper fehlt (%s). scripts/setup-stt.sh oder --dummy.", exc)
+            log.error("STT-Abhängigkeit fehlt (%s). scripts/setup-stt.sh oder --dummy.", exc)
             return 1
         except Exception:
             traceback.print_exc()

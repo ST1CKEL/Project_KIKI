@@ -1,0 +1,17 @@
+[Unit]
+Description=KIKI audio daemon (PipeWire, Silero VAD, openWakeWord)
+PartOf=graphical-session.target
+After=pipewire.service wireplumber.service graphical-session.target
+Wants=pipewire.service
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/kiki/voice.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m kiki.audio.daemon
+Restart=always
+RestartSec=2
+TimeoutStartSec=15
+
+[Install]
+WantedBy=graphical-session.target

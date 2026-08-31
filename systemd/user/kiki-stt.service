@@ -1,0 +1,17 @@
+[Unit]
+Description=KIKI faster-whisper STT (GPU, no silent fallback)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/kiki/voice.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+ExecStart=/usr/bin/env python3 -m kiki.stt.service
+Restart=always
+RestartSec=3
+TimeoutStartSec=600
+
+[Install]
+WantedBy=graphical-session.target

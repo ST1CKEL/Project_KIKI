@@ -32,6 +32,13 @@ voice = ["vosk>=0.3.44"]
 
 [project.scripts]
 kiki = "kiki.main:main"
+kiki-audio = "kiki.audio.daemon:main"
+kiki-stt = "kiki.stt.service:main"
+kiki-tts = "kiki.tts.service:main"
+kiki-orchestrator = "kiki.orchestrator.service:main"
+kiki-pet-voice = "kiki.ui.pet_service:main"
+kiki-trigger = "kiki.trigger:trigger"
+kiki-voice-doctor = "kiki.doctor:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

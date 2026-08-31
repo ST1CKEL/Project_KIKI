@@ -1,0 +1,84 @@
+# Voice-first runtime for KIKI. Copied to ~/.config/kiki/runtime.toml by
+# scripts/install-voice-stack.sh. Empty socket_dir → $XDG_RUNTIME_DIR/kiki.
+# Never hard-code /run/user/1000.
+
+[hardware]
+gpu_device_id = 0
+vram_safety_margin_mb = 2048
+
+[ipc]
+socket_dir = ""
+
+[audio]
+sample_rate_processing = 16000
+frame_duration_ms = 32
+pre_roll_buffer_ms = 400
+max_turn_ms = 8000
+listen_cue = true
+
+[vad]
+enabled = true
+model = "silero_vad"
+threshold = 0.55
+min_speech_ms = 220
+speech_pad_ms = 160
+
+[vad.modes.command]
+min_silence_ms = 280
+
+[wakeword]
+enabled = true
+engine = "openwakeword"
+model_name = "kiki"
+threshold = 0.58
+consecutive_frames = 2
+cooldown_ms = 1200
+barge_in_enabled = true
+barge_in_fadeout_ms = 120
+
+[stt]
+backend = "faster-whisper"
+# Systran/faster-whisper-large-v3-turbo returns 401 unauthenticated (2026-08).
+# deepdml's CTranslate2 export is the public turbo weights.
+model_name = "deepdml/faster-whisper-large-v3-turbo-ct2"
+device = "cuda"
+compute_type = "float16"
+language = "de"
+beam_size = 2
+allow_cpu = false
+
+[tts]
+# Official Kokoro-82M has no German pipeline here. Piper is the verified voice.
+primary_engine = "piper"
+# eva_k exists only as x_low. kerstin-low is the German female with a usable quality.
+primary_voice = "de_DE-kerstin-low"
+secondary_engine = ""
+secondary_voice = ""
+language = "de"
+sample_rate = 22050
+cache_phrases = true
+allow_espeak = false
+
+[tts.chunking]
+max_chunk_chars = 180
+semantic_min_words = 8
+semantic_max_words = 16
+stream_timeout_ms = 300
+
+[llm]
+provider = "ollama"
+base_url = "http://127.0.0.1:11434"
+model = "qwen2.5:7b"
+temperature = 0.6
+num_ctx = 8192
+target_vram_mb = 5200
+
+[vision_agent]
+enabled = true
+on_demand = true
+model = "qwen3-vl:4b"
+vram_requirement_mb = 3500
+
+[policy]
+autonomy = "balanced"
+confirmation_timeout_seconds = 20

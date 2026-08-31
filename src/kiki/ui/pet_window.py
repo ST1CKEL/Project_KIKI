@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from kiki.character.animation_engine import AnimationEngine
@@ -28,12 +29,16 @@ class PetWindow(Gtk.Window):
         machine: CharacterStateMachine,
         settings: Settings,
         capabilities: PlatformCapabilities,
+        on_primary_click: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(application=application, title="KIKI")
         self._pack = pack
         self._machine = machine
         self._settings = settings
         self._capabilities = capabilities
+        # Voice-first pet: left click starts listening. The full GTK app
+        # leaves this unset and opens chat, which stays the emergency toolbox.
+        self._on_primary_click = on_primary_click
         self._engine: AnimationEngine = pack.engine()
         self._textures: dict[str, Gdk.Texture] = {}
         self._pixbufs: dict[str, GdkPixbuf.Pixbuf] = {}
@@ -221,6 +226,9 @@ class PetWindow(Gtk.Window):
         if self._moved:
             return
         if gesture.get_current_button() == 1:
+            if self._on_primary_click is not None:
+                self._on_primary_click()
+                return
             app = self.get_application()
             if app is not None:
                 app.activate_action("chat", None)
